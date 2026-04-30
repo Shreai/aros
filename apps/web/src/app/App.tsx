@@ -178,6 +178,18 @@ function AuthenticatedRoutes({ path, isAdmin, onboarded }: { path: string; isAdm
   }
 
   // Dashboard (default for logged-in users)
+  if (path.startsWith('/human')) {
+    return (
+      <div className="aros-app">
+        <Sidebar />
+        <main className="aros-main">
+          <Dashboard />
+        </main>
+        <ArosChat />
+      </div>
+    );
+  }
+
   return (
     <div className="aros-app">
       <Sidebar />

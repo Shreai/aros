@@ -101,6 +101,30 @@
   max-width: 1100px;
 }
 
+.aros-human-grid {
+  display: grid;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.aros-human-grid--summary {
+  grid-template-columns: 1.4fr 1fr;
+}
+
+.aros-human-grid--work {
+  grid-template-columns: 1.1fr 0.9fr;
+}
+
+.aros-human-grid--signals {
+  grid-template-columns: 1fr 1fr;
+}
+
+.aros-human-manage-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .aros-dashboard h1 {
   font-size: 24px;
   font-weight: 700;
@@ -229,6 +253,16 @@
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .aros-human-grid--summary,
+  .aros-human-grid--work,
+  .aros-human-grid--signals {
+    grid-template-columns: 1fr;
+  }
+
+  .aros-human-manage-grid {
+    grid-template-columns: 1fr;
+  }
+
   .aros-main {
     padding: 24px 20px;
   }
@@ -271,6 +305,16 @@
   }
 
   .aros-dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .aros-human-grid--summary,
+  .aros-human-grid--work,
+  .aros-human-grid--signals {
+    grid-template-columns: 1fr;
+  }
+
+  .aros-human-manage-grid {
     grid-template-columns: 1fr;
   }
 

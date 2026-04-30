@@ -15,6 +15,7 @@ import {
 } from './billing/stripe.js';
 import { handleStripeWebhook } from './billing/webhook.js';
 import { provisionLicense } from './billing/license.js';
+import { listTasks } from '../tasks/store.js';
 import { createSupabaseAdmin } from './supabase.js';
 import { createEventBus } from 'shre-sdk/events';
 import { createHeartbeatMonitor } from 'shre-sdk/heartbeat';
@@ -24,6 +25,18 @@ import {
   getRecentFailures,
   getTraceStats,
 } from 'shre-sdk/trace';
+import {
+  activateAllHumanConnectors,
+  buildHumanLayerSnapshot,
+  getHumanConnectors,
+} from './human-layer.js';
+import {
+  createHumanGoal,
+  createHumanProject,
+  listHumanGoals,
+  listHumanProjects,
+} from './human-state.js';
+import { createTask } from '../tasks/store.js';
 
 const PORT = 5457;
 const startedAt = new Date().toISOString();
@@ -898,6 +911,7 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
 
     const tenant = tenantResult.data;
     const activities = activityResult.data || [];
+    const tenantTasks = listTasks(tenantId);
 
     // Agent stats (graceful if table doesn't exist)
     const agents: Array<{ agent_id: string; status: string; last_active_at: string | null }> =
@@ -940,6 +954,14 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
       };
     });
 
+    const humanLayer = buildHumanLayerSnapshot({
+      tenantId,
+      tenantName: tenant?.name || 'AROS',
+      createdAt: tenant?.created_at,
+      tasks: tenantTasks,
+      recentActivity: activities,
+    });
+
     // Build response — real data where available, zeros for unconnected sources
     const dashboard = {
       todaySales: {
@@ -961,6 +983,7 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
         items: [] as Array<{ name: string; current: number; threshold: number }>,
         _note: tenant?.pos_system ? undefined : 'Connect your POS system to see inventory alerts',
       },
+      humanLayer,
       recentActivity: recentActivity.length > 0 ? recentActivity : [
         {
           id: 'welcome',
@@ -976,6 +999,221 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to fetch dashboard';
     console.error('[dashboard]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleHumanBriefing(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
+  try {
+    const supabase = createSupabaseAdmin();
+    const [tenantResult, activityResult] = await Promise.all([
+      supabase
+        .from('tenants')
+        .select('name, created_at')
+        .eq('id', auth.tenantId)
+        .single(),
+      supabase
+        .from('audit_log')
+        .select('action, detail, created_at')
+        .eq('tenant_id', auth.tenantId)
+        .order('created_at', { ascending: false })
+        .limit(12),
+    ]);
+
+    const briefing = buildHumanLayerSnapshot({
+      tenantId: auth.tenantId,
+      tenantName: tenantResult.data?.name || 'AROS',
+      createdAt: tenantResult.data?.created_at,
+      tasks: listTasks(auth.tenantId),
+      recentActivity: (activityResult.data || []).map((row: { action: string; detail: Record<string, unknown> | null; created_at: string }) => row),
+    });
+
+    json(res, 200, briefing);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to fetch human briefing';
+    console.error('[human-briefing]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleHumanConnectors(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
+  try {
+    json(res, 200, { connectors: getHumanConnectors(auth.tenantId) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to fetch connectors';
+    console.error('[human-connectors]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleActivateHumanConnectors(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
+  try {
+    const connectors = activateAllHumanConnectors(auth.tenantId);
+    json(res, 200, {
+      ok: true,
+      activated: connectors.length,
+      connectors,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to activate connectors';
+    console.error('[human-connectors]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function buildTenantHumanSnapshot(tenantId: string) {
+  const supabase = createSupabaseAdmin();
+  const [tenantResult, activityResult] = await Promise.all([
+    supabase
+      .from('tenants')
+      .select('name, created_at')
+      .eq('id', tenantId)
+      .single(),
+    supabase
+      .from('audit_log')
+      .select('action, detail, created_at')
+      .eq('tenant_id', tenantId)
+      .order('created_at', { ascending: false })
+      .limit(12),
+  ]);
+
+  return buildHumanLayerSnapshot({
+    tenantId,
+    tenantName: tenantResult.data?.name || 'AROS',
+    createdAt: tenantResult.data?.created_at,
+    tasks: listTasks(tenantId),
+    recentActivity: (activityResult.data || []).map((row: { action: string; detail: Record<string, unknown> | null; created_at: string }) => row),
+  });
+}
+
+async function handleHumanState(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+
+  try {
+    json(res, 200, {
+      ...await buildTenantHumanSnapshot(auth.tenantId),
+      projects: listHumanProjects(auth.tenantId),
+      goals: listHumanGoals(auth.tenantId),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to fetch human state';
+    console.error('[human-state]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleHumanTasks(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+
+  if ((req.method ?? 'GET') === 'GET') {
+    return json(res, 200, { tasks: listTasks(auth.tenantId) });
+  }
+
+  try {
+    const body = await parseJsonBody(req);
+    const title = String(body?.title ?? '').trim();
+    const description = String(body?.description ?? '').trim();
+    if (!title || !description) {
+      return json(res, 400, { error: 'title and description are required' });
+    }
+
+    const task = createTask({
+      title,
+      description,
+      priority: (body?.priority as TaskPriority | undefined) ?? 'normal',
+      agentId: String(body?.agentId ?? 'human-tasks-001'),
+      tenantId: auth.tenantId,
+      createdBy: auth.userId,
+      parentTaskId: typeof body?.parentTaskId === 'string' ? body.parentTaskId : undefined,
+      tags: Array.isArray(body?.tags) ? body.tags.map(String) : [],
+      context: typeof body?.context === 'object' && body?.context ? body.context as Record<string, unknown> : {},
+    });
+
+    json(res, 201, { task });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to create task';
+    console.error('[human-tasks]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleHumanProjects(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+
+  if ((req.method ?? 'GET') === 'GET') {
+    return json(res, 200, { projects: listHumanProjects(auth.tenantId) });
+  }
+
+  try {
+    const body = await parseJsonBody(req);
+    const name = String(body?.name ?? '').trim();
+    const description = String(body?.description ?? '').trim();
+    if (!name || !description) {
+      return json(res, 400, { error: 'name and description are required' });
+    }
+    const project = createHumanProject(auth.tenantId, {
+      name,
+      description,
+      status: body?.status as 'on_track' | 'watch' | 'stalled' | undefined,
+      progress: typeof body?.progress === 'number' ? body.progress : undefined,
+      openTasks: typeof body?.openTasks === 'number' ? body.openTasks : undefined,
+      completedTasks: typeof body?.completedTasks === 'number' ? body.completedTasks : undefined,
+      blockers: Array.isArray(body?.blockers) ? body.blockers.map(String) : undefined,
+    });
+    json(res, 201, { project });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to create project';
+    console.error('[human-projects]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleHumanGoals(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+
+  if ((req.method ?? 'GET') === 'GET') {
+    return json(res, 200, { goals: listHumanGoals(auth.tenantId) });
+  }
+
+  try {
+    const body = await parseJsonBody(req);
+    const name = String(body?.name ?? '').trim();
+    const metric = String(body?.metric ?? '').trim();
+    const target = String(body?.target ?? '').trim();
+    if (!name || !metric || !target) {
+      return json(res, 400, { error: 'name, metric, and target are required' });
+    }
+    const goal = createHumanGoal(auth.tenantId, {
+      name,
+      metric,
+      target,
+      status: body?.status as 'on_track' | 'at_risk' | 'done' | undefined,
+      progress: typeof body?.progress === 'number' ? body.progress : undefined,
+      linkedProjectIds: Array.isArray(body?.linkedProjectIds) ? body.linkedProjectIds.map(String) : undefined,
+    });
+    json(res, 201, { goal });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to create goal';
+    console.error('[human-goals]', message);
     json(res, 500, { error: message });
   }
 }
@@ -1085,6 +1323,46 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   // ── Dashboard (authenticated) ──────────────────────────
   if (url === '/api/dashboard' && method === 'GET') {
     return handleDashboard(req, res);
+  }
+
+  if (url === '/api/human/state' && method === 'GET') {
+    return handleHumanState(req, res);
+  }
+
+  if (url === '/api/human/briefing' && method === 'GET') {
+    return handleHumanBriefing(req, res);
+  }
+
+  if (url === '/api/human/tasks' && method === 'GET') {
+    return handleHumanTasks(req, res);
+  }
+
+  if (url === '/api/human/tasks' && method === 'POST') {
+    return handleHumanTasks(req, res);
+  }
+
+  if (url === '/api/human/projects' && method === 'GET') {
+    return handleHumanProjects(req, res);
+  }
+
+  if (url === '/api/human/projects' && method === 'POST') {
+    return handleHumanProjects(req, res);
+  }
+
+  if (url === '/api/human/goals' && method === 'GET') {
+    return handleHumanGoals(req, res);
+  }
+
+  if (url === '/api/human/goals' && method === 'POST') {
+    return handleHumanGoals(req, res);
+  }
+
+  if (url === '/api/human/connectors' && method === 'GET') {
+    return handleHumanConnectors(req, res);
+  }
+
+  if (url === '/api/human/connectors/activate' && method === 'POST') {
+    return handleActivateHumanConnectors(req, res);
   }
 
   // ── Lead capture (public, no auth) ──────────────────────

@@ -8,6 +8,7 @@ export function Sidebar() {
   const { config } = useWhitelabel();
   const { isAdmin } = useAuth();
   const [open, setOpen] = useState(false);
+  const path = window.location.pathname;
 
   const toggle = useCallback(() => setOpen(prev => !prev), []);
   const close = useCallback(() => setOpen(false), []);
@@ -51,7 +52,8 @@ export function Sidebar() {
           <TenantPicker />
         </div>
         <nav className="aros-nav">
-          <a href="/dashboard" className="aros-nav-item active" onClick={close}>Dashboard</a>
+          <a href="/dashboard" className={`aros-nav-item${path.startsWith('/dashboard') || path === '/' ? ' active' : ''}`} onClick={close}>Dashboard</a>
+          <a href="/human" className={`aros-nav-item${path.startsWith('/human') ? ' active' : ''}`} onClick={close}>Human OS</a>
           {config.features?.marketplace && <a href="/marketplace" className="aros-nav-item" onClick={close}>Marketplace</a>}
           {config.features?.marketplace && <a href="/developers" className="aros-nav-item" onClick={close}>Settings</a>}
           {config.features?.analytics && <a href="/analytics" className="aros-nav-item" onClick={close}>Analytics</a>}
