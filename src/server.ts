@@ -40,6 +40,7 @@ import { createTask } from '../tasks/store.js';
 
 const PORT = 5457;
 const startedAt = new Date().toISOString();
+const SHRE_METER_URL = process.env.SHRE_METER_URL || 'http://127.0.0.1:5495';
 
 // ── Platform Integrations ────────────────────────────────────────
 const eventBus = createEventBus('aros-platform');
@@ -353,6 +354,36 @@ async function handleBillingStatus(req: IncomingMessage, res: ServerResponse): P
       }
     }
 
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const periodStart = monthStart.toISOString();
+    const periodEnd = new Date().toISOString();
+
+    let currentPeriodUsage: {
+      totalCostUsd?: number;
+      totalSavingsUsd?: number;
+      totalRequests?: number;
+      totalTokens?: number;
+      avgCostPerRequest?: number;
+      periodFrom?: string;
+      periodTo?: string;
+    } | null = null;
+
+    try {
+      const meterUrl = new URL('/v1/costs/summary', SHRE_METER_URL);
+      meterUrl.searchParams.set('from', periodStart);
+      meterUrl.searchParams.set('to', periodEnd);
+      meterUrl.searchParams.set('tenantId', tenantId);
+
+      const meterRes = await fetch(meterUrl);
+      if (meterRes.ok) {
+        currentPeriodUsage = (await meterRes.json()) as typeof currentPeriodUsage;
+      }
+    } catch {
+      // Best-effort only. Billing status still returns cached subscription state.
+    }
+
     json(res, 200, {
       tenantId: data.id,
       plan: subscription?.plan || data.plan,
@@ -360,6 +391,19 @@ async function handleBillingStatus(req: IncomingMessage, res: ServerResponse): P
       stripeCustomerId: data.stripe_customer_id,
       subscription,
       licenseTier: data.license_tier,
+      currentPeriodSpendCents:
+        currentPeriodUsage?.totalCostUsd != null
+          ? Math.round(currentPeriodUsage.totalCostUsd * 100)
+          : undefined,
+      currentPeriodEventCount: currentPeriodUsage?.totalRequests,
+      currentPeriodUsage: currentPeriodUsage
+        ? {
+            totalCents: Math.round((currentPeriodUsage.totalCostUsd || 0) * 100),
+            eventCount: currentPeriodUsage.totalRequests,
+            periodStart,
+            periodEnd,
+          }
+        : undefined,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to fetch billing status';
