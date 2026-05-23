@@ -26,6 +26,18 @@ The workflow runs `deploy/scripts/validate-runtime-ownership.mjs` before SSH dep
   - domain `beta.aros.live` or `dev.aros.live`
   - Supabase project `tvdvfdmpackwebfasrsw`
 
+## Protected Runtime Paths
+
+The deploy workflow excludes these paths from `rsync --delete` to avoid
+clobbering staging/prod runtime-managed assets:
+
+- `mib007-live/`
+- `shre-sdk/`
+- `ports.json`
+
+These are currently managed in-place on VPS and must be migrated to a single
+repo-owned deployment path before they can be safely included in destructive sync.
+
 ## Known Limitation
 
 Current staging PM2 apps (`aros-beta`, `aros-dev`) run from `/opt/aros-platform/mib007-live`, which is not sourced from this repo.  
