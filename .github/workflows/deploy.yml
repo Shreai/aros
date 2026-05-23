@@ -1,0 +1,142 @@
+name: Deploy AROS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Deployment target"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET="${{ github.event.inputs.target_env }}"
+          else
+            case "${{ github.ref_name }}" in
+              main) TARGET="prod" ;;
+              develop) TARGET="staging" ;;
+              *) echo "Unsupported branch for deploy"; exit 1 ;;
+            esac
+          fi
+          echo "target_env=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "Target env: $TARGET"
+
+      - name: Resolve deploy host
+        id: host
+        run: |
+          if [ "${{ steps.target.outputs.target_env }}" = "prod" ]; then
+            echo "ssh_host=${{ secrets.AROS_MAIN_SSH_HOST }}" >> "$GITHUB_OUTPUT"
+            echo "public_url=https://aros.live" >> "$GITHUB_OUTPUT"
+            echo "expected_supabase=https://ionljrbrvulbmscodtzg.supabase.co" >> "$GITHUB_OUTPUT"
+          else
+            echo "ssh_host=${{ secrets.AROS_STAGING_SSH_HOST }}" >> "$GITHUB_OUTPUT"
+            echo "public_url=https://beta.aros.live" >> "$GITHUB_OUTPUT"
+            echo "expected_supabase=https://tvdvfdmpackwebfasrsw.supabase.co" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Runtime ownership gate
+        run: |
+          node deploy/scripts/validate-runtime-ownership.mjs
+        env:
+          TARGET_ENV: ${{ steps.target.outputs.target_env }}
+          RUNTIME_REPO: aros
+          PUBLIC_URL: ${{ steps.host.outputs.public_url }}
+          SUPABASE_URL: ${{ steps.host.outputs.expected_supabase }}
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AROS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ steps.host.outputs.ssh_host }}" >> ~/.ssh/known_hosts
+
+      - name: Sync source
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude "node_modules" \
+            --exclude ".env" \
+            --exclude ".DS_Store" \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ root@"${{ steps.host.outputs.ssh_host }}":/opt/aros-platform/
+
+      - name: Build and restart (prod)
+        if: steps.target.outputs.target_env == 'prod'
+        run: |
+          ssh -i ~/.ssh/deploy_key root@"${{ steps.host.outputs.ssh_host }}" 'bash -s' << 'EOS'
+          set -euo pipefail
+          cd /opt/aros-platform
+          pnpm install --frozen-lockfile
+          pnpm build
+
+          pm2 describe aros-prod >/dev/null 2>&1 || { echo "Missing PM2 app: aros-prod"; exit 1; }
+          pm2 restart aros-prod
+          pm2 save
+          EOS
+
+      - name: Build and restart (staging)
+        if: steps.target.outputs.target_env == 'staging'
+        run: |
+          ssh -i ~/.ssh/deploy_key root@"${{ steps.host.outputs.ssh_host }}" 'bash -s' << 'EOS'
+          set -euo pipefail
+          cd /opt/aros-platform
+          pnpm install --frozen-lockfile
+          pnpm build
+
+          # Current staging runtime uses mib007-live under /opt/aros-platform.
+          pm2 describe aros-beta >/dev/null 2>&1 || { echo "Missing PM2 app: aros-beta"; exit 1; }
+          pm2 describe aros-dev >/dev/null 2>&1 || { echo "Missing PM2 app: aros-dev"; exit 1; }
+          pm2 restart aros-beta
+          pm2 restart aros-dev
+          pm2 save
+          EOS
+
+      - name: Validate remote environment mapping
+        run: |
+          ssh -i ~/.ssh/deploy_key root@"${{ steps.host.outputs.ssh_host }}" 'bash -s' << 'EOS'
+          set -euo pipefail
+
+          if [ "${{ steps.target.outputs.target_env }}" = "prod" ]; then
+            grep -q '^SUPABASE_URL=https://ionljrbrvulbmscodtzg\.supabase\.co$' /opt/aros-platform/.env
+            grep -q '^AROS_DOMAIN=aros\.live$' /opt/aros-platform/.env
+            grep -q '^AROS_PUBLIC_URL=https://aros\.live$' /opt/aros-platform/.env
+          else
+            grep -q '^SUPABASE_URL=https://tvdvfdmpackwebfasrsw\.supabase\.co$' /opt/aros-platform/.env
+            grep -q '^AROS_DOMAIN=beta\.aros\.live$' /opt/aros-platform/.env
+            grep -q '^AROS_PUBLIC_URL=https://beta\.aros\.live$' /opt/aros-platform/.env
+            grep -q '^SUPABASE_URL=https://tvdvfdmpackwebfasrsw\.supabase\.co$' /opt/aros-platform/mib007-live/server/.env
+            grep -q '^MIB007_PUBLIC_URL=https://beta\.aros\.live$' /opt/aros-platform/mib007-live/server/.env
+            grep -q '^SUPABASE_URL=https://tvdvfdmpackwebfasrsw\.supabase\.co$' /opt/aros-platform/mib007-live/server/.env.dev
+            grep -q '^MIB007_PUBLIC_URL=https://dev\.aros\.live$' /opt/aros-platform/mib007-live/server/.env.dev
+          fi
+          EOS
+
+      - name: Health check (prod)
+        if: steps.target.outputs.target_env == 'prod'
+        run: |
+          curl -fsS --max-time 20 "${{ steps.host.outputs.public_url }}" >/dev/null
+          echo "Health check passed: ${{ steps.host.outputs.public_url }}"
+
+      - name: Health check (staging)
+        if: steps.target.outputs.target_env == 'staging'
+        run: |
+          curl -fsS --max-time 20 https://beta.aros.live >/dev/null
+          curl -fsS --max-time 20 https://dev.aros.live >/dev/null
+          echo "Health check passed: beta.aros.live + dev.aros.live"
