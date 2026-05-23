@@ -1,10 +1,6 @@
 name: Deploy AROS
 
 on:
-  push:
-    branches:
-      - main
-      - develop
   workflow_dispatch:
     inputs:
       target_env:
@@ -141,12 +137,25 @@ jobs:
       - name: Health check (prod)
         if: steps.target.outputs.target_env == 'prod'
         run: |
-          curl -fsS --max-time 20 "${{ steps.host.outputs.public_url }}" >/dev/null
+          for i in 1 2 3; do
+            curl -fsS --max-time 20 "${{ steps.host.outputs.public_url }}" >/dev/null && break
+            sleep 5
+          done
           echo "Health check passed: ${{ steps.host.outputs.public_url }}"
 
       - name: Health check (staging)
         if: steps.target.outputs.target_env == 'staging'
         run: |
-          curl -fsS --max-time 20 https://beta.aros.live >/dev/null
-          curl -fsS --max-time 20 https://dev.aros.live >/dev/null
+          for i in 1 2 3 4; do
+            BETA_OK=0
+            DEV_OK=0
+            curl -fsS --max-time 20 https://beta.aros.live >/dev/null && BETA_OK=1 || true
+            curl -fsS --max-time 20 https://dev.aros.live >/dev/null && DEV_OK=1 || true
+            if [ "$BETA_OK" = "1" ] && [ "$DEV_OK" = "1" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test "$BETA_OK" = "1"
+          test "$DEV_OK" = "1"
           echo "Health check passed: beta.aros.live + dev.aros.live"
