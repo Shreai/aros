@@ -160,15 +160,18 @@ jobs:
       - name: Health check (staging)
         if: steps.target.outputs.target_env == 'staging'
         run: |
-          for i in 1 2 3 4; do
+          # Staging may return transient 502s right after PM2 restarts.
+          # Give both domains up to 2 minutes to settle.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             BETA_OK=0
             DEV_OK=0
             curl -fsS --max-time 20 https://beta.aros.live >/dev/null && BETA_OK=1 || true
             curl -fsS --max-time 20 https://dev.aros.live >/dev/null && DEV_OK=1 || true
+            echo "Attempt $i: beta=$BETA_OK dev=$DEV_OK"
             if [ "$BETA_OK" = "1" ] && [ "$DEV_OK" = "1" ]; then
               break
             fi
-            sleep 5
+            sleep 10
           done
           test "$BETA_OK" = "1"
           test "$DEV_OK" = "1"
