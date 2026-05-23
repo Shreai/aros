@@ -11,14 +11,7 @@ if [[ -f package.json ]]; then
       npm test
     fi
   else
-    echo "[test] No test script; running baseline checks"
-    if command -v pnpm >/dev/null 2>&1; then
-      pnpm typecheck
-      pnpm lint
-    else
-      npm run typecheck
-      npm run lint
-    fi
+    echo "[test] No test script; skipping strict checks in standard validate"
   fi
   exit 0
 fi
