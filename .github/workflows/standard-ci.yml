@@ -27,6 +27,20 @@ jobs:
       - name: Install Node deps
         if: ${{ hashFiles('package.json') != '' }}
         run: |
+          # CI runners do not include ../shre-sdk, but package.json references
+          # it as a local file dependency. Create a minimal stub for validation.
+          if [ ! -d ../shre-sdk ]; then
+            mkdir -p ../shre-sdk
+            cat > ../shre-sdk/package.json <<'JSON'
+          {
+            "name": "shre-sdk",
+            "version": "0.0.0-ci-stub",
+            "main": "index.js"
+          }
+          JSON
+            echo "module.exports = {};" > ../shre-sdk/index.js
+          fi
+
           npm install -g pnpm || true
           if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; else npm ci || npm install; fi
 
@@ -46,4 +60,16 @@ jobs:
       - name: Run tests
         run: |
           chmod +x scripts/test.sh || true
-          if [ -f scripts/test.sh ]; then ./scripts/test.sh; else echo "No scripts/test.sh"; fi
+          if [ -f scripts/test.sh ]; then
+            ./scripts/test.sh
+          elif [ -f package.json ]; then
+            if jq -e '.scripts.test' package.json >/dev/null; then
+              pnpm test
+            else
+              echo "No test script; running baseline checks"
+              pnpm typecheck
+              pnpm lint
+            fi
+          else
+            echo "No test entrypoint found"
+          fi

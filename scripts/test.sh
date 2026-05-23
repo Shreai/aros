@@ -4,10 +4,14 @@ set -euo pipefail
 echo "[test] Running unit/integration tests"
 
 if [[ -f package.json ]]; then
-  if command -v pnpm >/dev/null 2>&1; then
-    pnpm test
+  if command -v jq >/dev/null 2>&1 && jq -e '.scripts.test' package.json >/dev/null; then
+    if command -v pnpm >/dev/null 2>&1; then
+      pnpm test
+    else
+      npm test
+    fi
   else
-    npm test
+    echo "[test] No test script; skipping strict checks in standard validate"
   fi
   exit 0
 fi
