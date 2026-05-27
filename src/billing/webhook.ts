@@ -112,6 +112,41 @@ export async function handleStripeWebhook(
       break;
     }
 
+    case 'charge.succeeded': {
+      const charge = event.data.object as Stripe.Charge;
+      const tenantId = charge.metadata?.tenant_id;
+      const amountUsd = (charge.amount ?? 0) / 100;
+      if (tenantId && amountUsd > 0) {
+        const meterUrl = process.env.SHRE_METER_URL ?? 'http://127.0.0.1:5495';
+        await fetch(`${meterUrl}/v1/credit/${encodeURIComponent(tenantId)}/payment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'recharge', amountUsd }),
+          signal: AbortSignal.timeout(4000),
+        }).catch(() => {});
+      }
+      break;
+    }
+
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object as Stripe.Invoice;
+      const tenantId =
+        typeof invoice.subscription_details?.metadata?.tenant_id === 'string'
+          ? invoice.subscription_details.metadata.tenant_id
+          : (invoice as unknown as { metadata?: { tenant_id?: string } }).metadata?.tenant_id;
+      const amountUsd = (invoice.amount_paid ?? 0) / 100;
+      if (tenantId && amountUsd > 0) {
+        const meterUrl = process.env.SHRE_METER_URL ?? 'http://127.0.0.1:5495';
+        await fetch(`${meterUrl}/v1/credit/${encodeURIComponent(tenantId)}/payment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'recharge', amountUsd }),
+          signal: AbortSignal.timeout(4000),
+        }).catch(() => {});
+      }
+      break;
+    }
+
     default:
       // Unhandled event type — acknowledge receipt
       break;
