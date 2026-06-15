@@ -92,6 +92,10 @@ export function StartChat() {
         body: JSON.stringify({
           agentId: 'aros-agent',
           sessionId: sessionId.current,
+          // Sent every request so demo mode is restart-proof (no dependence on a
+          // server-side session flag that an in-memory store could lose).
+          demoMode: true,
+          demoScenario: intent.current,
           messages: [{ role: 'user', content: t }],
           stream: false,
         }),
