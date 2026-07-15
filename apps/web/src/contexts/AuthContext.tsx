@@ -143,6 +143,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (active) localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, active.id);
   }, []);
 
+  const hydrateUserAndSettle = useCallback(async (s: Session | null) => {
+    try {
+      await hydrateUser(s);
+    } finally {
+      setLoading(false);
+    }
+  }, [hydrateUser]);
+
   const refreshMemberships = useCallback(async () => {
     if (!session?.user) return;
     setLoading(true);
@@ -165,9 +173,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     supabase.auth.getSession()
-      .then(async ({ data: { session: s } }) => {
-        await hydrateUser(s);
-      })
+      .then(({ data: { session: s } }) => hydrateUserAndSettle(s))
       .catch(() => {
         setSession(null);
         setUser(null);
@@ -176,12 +182,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .finally(() => setLoading(false));
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, s) => {
-        await hydrateUser(s);
+      (_event, s) => {
+        setTimeout(() => {
+          void hydrateUserAndSettle(s);
+        }, 0);
       },
     );
     return () => subscription.unsubscribe();
-  }, [hydrateUser]);
+  }, [hydrateUserAndSettle]);
 
   const selectTenant = useCallback((tenantId: string) => {
     const hit = memberships.find((m) => m.tenant.id === tenantId);
