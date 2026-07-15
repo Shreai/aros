@@ -45,13 +45,26 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+// Prod hotfix carried over from the live VPS tree (2026-07-14 reconcile):
+// a hung Supabase call here left the whole app on the loading spinner.
+const MEMBERSHIP_FETCH_TIMEOUT_MS = 5000;
+
 async function fetchMemberships(userId: string): Promise<TenantMembership[]> {
   try {
-    const { data, error } = await supabase
+    const query = supabase
       .from('tenant_members')
       .select('tenant_id, role, is_default, status, tenant:tenants(*)')
       .eq('user_id', userId)
       .eq('status', 'active');
+    const { data, error } = await Promise.race([
+      query,
+      new Promise<{ data: null; error: Error }>((resolve) => {
+        window.setTimeout(
+          () => resolve({ data: null, error: new Error('Membership lookup timed out') }),
+          MEMBERSHIP_FETCH_TIMEOUT_MS,
+        );
+      }),
+    ]);
     if (error || !data) return [];
     return (data as unknown as TenantMembership[]).filter((m) => !!m.tenant);
   } catch {
@@ -97,10 +110,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
-      await hydrateUser(s);
-      setLoading(false);
-    });
+    // Prod hotfix carried over from the live VPS tree: a rejected getSession
+    // previously skipped setLoading(false) and stranded the loading screen.
+    supabase.auth.getSession()
+      .then(async ({ data: { session: s } }) => {
+        await hydrateUser(s);
+      })
+      .catch(() => {
+        setSession(null);
+        setUser(null);
+        setMemberships([]);
+        setTenant(null);
+      })
+      .finally(() => setLoading(false));
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (_event, s) => {
         await hydrateUser(s);

@@ -30,6 +30,8 @@ export default defineConfig(({ command, mode }) => {
 
   // Fail the build loudly instead of shipping a bundle that throws
   // "supabaseUrl is required" at load and renders a blank white page.
+  // This throws during config load, BEFORE Vite empties the dist, so a
+  // misconfigured rebuild leaves the previous good build intact.
   if (command === 'build' && (!supabaseUrl || !supabaseAnonKey)) {
     throw new Error(
       '[aros-web] Refusing to build: VITE_SUPABASE_URL/SUPABASE_URL and ' +
