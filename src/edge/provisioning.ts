@@ -55,13 +55,14 @@ export class EdgeProvisioningService {
     const heartbeat = device?.latestHeartbeat ?? null;
     const commanderReachable = heartbeat?.commanderReachable === true;
     const cloudConnected = device?.status === 'online' || device?.status === 'degraded';
+    const initialSyncComplete = Boolean(heartbeat?.lastCloudUpload);
     return {
       storeId,
-      state: commanderReachable ? 'connected' : cloudConnected ? 'needs_attention' : device ? 'offline' : 'not_started',
+      state: commanderReachable && initialSyncComplete ? 'connected' : cloudConnected ? 'needs_attention' : device ? 'offline' : 'not_started',
       steps: {
         activationCreated: device ? true : await this.repository.hasUsableActivation(auth.tenantId, storeId),
         deviceEnrolled: Boolean(device), cloudConnected, commanderConnected: commanderReachable,
-        initialSyncComplete: Boolean(heartbeat?.lastCloudUpload),
+        initialSyncComplete,
       },
       device,
     };

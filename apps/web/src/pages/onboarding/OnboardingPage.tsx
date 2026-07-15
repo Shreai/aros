@@ -78,6 +78,10 @@ export function OnboardingPage() {
   const [posConnected, setPosConnected] = useState(false);
   const [posLoading, setPosLoading] = useState(false);
   const [posError, setPosError] = useState('');
+  const [edgeStatus, setEdgeStatus] = useState<Record<string, boolean>>({
+    activationCreated: false, deviceEnrolled: false, cloudConnected: false,
+    commanderConnected: false, initialSyncComplete: false,
+  });
   const [edgeProducts, setEdgeProducts] = useState<string[]>(['aros']);
   const [deploymentMode, setDeploymentMode] = useState<'existing-computer' | 'managed-edge'>('existing-computer');
   const [remoteCommanderAccess, setRemoteCommanderAccess] = useState(false);
@@ -277,6 +281,7 @@ export function OnboardingPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not generate an activation code.');
       setActivation({ code: data.activationCode, expiresAt: data.expiresAt });
+      setEdgeStatus(current => ({ ...current, activationCreated: true }));
     } catch (err) {
       setPosError(err instanceof Error ? err.message : 'Could not start the connection.');
     } finally {
@@ -296,8 +301,9 @@ export function OnboardingPage() {
         );
         if (!res.ok) return;
         const data = await res.json().catch(() => ({}));
-        if (active && data.state === 'connected') {
-          setPosConnected(true);
+        if (active && data.steps) {
+          setEdgeStatus(data.steps);
+          setPosConnected(data.steps.initialSyncComplete === true);
         }
       } catch {
         /* transient — keep polling */
@@ -684,8 +690,8 @@ export function OnboardingPage() {
                       <li>
                         Open the <a href="/verifone/download.html" style={styles.link} target="_blank" rel="noopener">Edge Relay installer</a> on a store computer and choose its operating system.
                       </li>
-                      <li>In the setup wizard, enter your Commander IP (usually <code>192.168.31.11</code>) and credentials — they stay on-site.</li>
-                      <li>Paste the activation code above to link it to this store.</li>
+                      <li>Paste the activation code above. The installer links this computer without asking for tenant or store IDs.</li>
+                      <li>Open the local setup page and enter the Commander address and credentials. The app tests both supported Commander configuration paths; credentials stay on-site.</li>
                       <li>Choose <strong>{edgeProducts.includes('aros') && edgeProducts.includes('cstoresku') ? 'AROS + CStoreSKU' : edgeProducts.includes('cstoresku') ? 'CStoreSKU' : 'AROS Edge'}</strong> in the installer.</li>
                       <li>Validate a closed business period before automatic sync begins.</li>
                     </ol>
@@ -697,9 +703,19 @@ export function OnboardingPage() {
                     <div style={{ fontSize: 12, color: '#6b7280', background: '#f9fafb', borderRadius: 8, padding: 10 }}>
                       Don't want to manage a computer? <strong>We can host the edge for you</strong> — reply to your welcome email and we'll set up a managed device.
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#6b7280' }}>
-                      <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' }} />
-                      Waiting for your edge app to connect…
+                    <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+                      {[
+                        ['activationCreated', 'Activation code created'],
+                        ['deviceEnrolled', 'Connector enrolled'],
+                        ['cloudConnected', 'Cloud connection verified'],
+                        ['commanderConnected', 'Commander connection verified'],
+                        ['initialSyncComplete', 'Initial read-only sync complete'],
+                      ].map(([key, label]) => (
+                        <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, color: edgeStatus[key] ? '#047857' : '#6b7280' }}>
+                          <span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: edgeStatus[key] ? '#10b981' : '#f59e0b' }} />
+                          {label}{edgeStatus[key] ? ' ✓' : ''}
+                        </div>
+                      ))}
                     </div>
                   </>
                 )}
@@ -710,7 +726,7 @@ export function OnboardingPage() {
               <div style={{ textAlign: 'center', padding: '8px 0' }}>
                 <div style={{ fontSize: 40 }}>✅</div>
                 <div style={{ fontWeight: 700, color: '#059669', margin: '8px 0' }}>Store connected</div>
-                <p style={{ fontSize: 13, color: '#6b7280' }}>Your Verifone data is flowing in.</p>
+                <p style={{ fontSize: 13, color: '#6b7280' }}>Commander is verified and the initial read-only sync completed.</p>
               </div>
             )}
 
