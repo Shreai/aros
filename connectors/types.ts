@@ -51,6 +51,9 @@ export interface AzureDbConnection {
 export interface RapidRmsSession {
   config: RapidRmsApiConfig;
   dbName: string;
+  /** Bearer token from /api/Login/Auth (the API is token-based, not cookie-based). */
+  accessToken: string;
+  /** @deprecated kept for compatibility; the live API does not use cookies. */
   cookie: string;
   expiresAt: number;
   authenticated: boolean;
