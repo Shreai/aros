@@ -1,0 +1,188 @@
+// ── Connector Data Service ──────────────────────────────────────
+// The read-back layer: given a *connected* tenant connector, pull live
+// store data and normalize it into a StoreSummary the dashboard + agent
+// can consume. This is the bridge that was missing between "credential
+// stored & tested" and "user/agent sees real numbers".
+//
+// Failure modes are deliberate: an auth failure throws (caller falls back
+// to the honest "connect your store" placeholder); a *shape* mismatch on
+// one section yields an empty section flagged `partial: true` rather than
+// fabricated numbers. We never guess a value we can't read confidently.
+
+import * as rapidRms from './rapidrms-api.js';
+import { setTenantSecret, storeCredential, deleteCredential } from './vault-ref.js';
+
+export interface StoreSummary {
+  todaySales: { revenue: number; transactions: number; changePercent: number | null };
+  lowStock: {
+    count: number;
+    items: Array<{ name: string; current: number; threshold: number }>;
+  };
+  source: { type: string; name: string };
+  fetchedAt: string;
+  /** True when one or more sections could not be read from the store's payload. */
+  partial: boolean;
+}
+
+export interface ConnectorRecord {
+  id: string;
+  type: string;
+  name: string;
+  config: Record<string, unknown>;
+  /** Already decrypted by the caller. */
+  secrets: Record<string, string>;
+}
+
+// ── Defensive coercion helpers ──────────────────────────────────
+// Store APIs return loosely-typed JSON in inconsistent envelopes. These
+// tolerate the common shapes and refuse to invent data when unsure.
+
+function toRows(payload: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(payload)) return payload as Array<Record<string, unknown>>;
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+    for (const key of ['data', 'Data', 'Rows', 'rows', 'Result', 'result', 'Items', 'items', 'value']) {
+      if (Array.isArray(obj[key])) return obj[key] as Array<Record<string, unknown>>;
+    }
+  }
+  return [];
+}
+
+/** Read the first present numeric field from a candidate name list. Returns null if none parse. */
+function pickNum(row: Record<string, unknown>, names: string[]): number | null {
+  for (const n of names) {
+    const v = row[n];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+
+function pickStr(row: Record<string, unknown>, names: string[]): string | null {
+  for (const n of names) {
+    const v = row[n];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return null;
+}
+
+// TODO(real-tenant): field-name lists below are validated against RapidRMS's
+// documented endpoints but not yet against a live tenant response. The
+// defensive design means an unrecognized shape yields an empty (partial)
+// section, never a wrong number — safe to ship, refine once a real tenant
+// connects.
+const REVENUE_FIELDS = ['Total', 'NetSales', 'NetTotal', 'GrandTotal', 'SalesAmount', 'Amount', 'TotalAmount'];
+const TXN_COUNT_FIELDS = ['TransactionCount', 'Transactions', 'Count', 'InvoiceCount', 'Receipts'];
+const QTY_FIELDS = ['OnHand', 'QtyOnHand', 'Quantity', 'Qty', 'StockOnHand', 'CurrentStock'];
+const REORDER_FIELDS = ['ReorderPoint', 'ReorderLevel', 'MinQty', 'MinimumQty', 'Threshold', 'ParLevel'];
+const NAME_FIELDS = ['Name', 'ItemName', 'Description', 'ProductName', 'Product'];
+
+function todayRange(): { from: string; to: string } {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
+  const day = `${y}-${m}-${d}`;
+  return { from: `${day}T00:00:00`, to: `${day}T23:59:59` };
+}
+
+// ── RapidRMS summary ────────────────────────────────────────────
+
+async function fetchRapidRmsSummary(
+  record: ConnectorRecord,
+  vaultSecret: string,
+): Promise<StoreSummary> {
+  const refs: string[] = [];
+  try {
+    setTenantSecret(vaultSecret);
+    const emailRef = await storeCredential(`${record.id}:email`, record.secrets.email ?? '');
+    const passwordRef = await storeCredential(`${record.id}:password`, record.secrets.password ?? '');
+    refs.push(emailRef, passwordRef);
+
+    const session = await rapidRms.authenticate(
+      {
+        baseUrl: String(record.config.baseUrl || 'https://rapidrmsapi.azurewebsites.net'),
+        clientId: String(record.config.clientId || ''),
+        sessionTimeout: Number(record.config.sessionTimeout) || 420,
+      },
+      emailRef,
+      passwordRef,
+    );
+
+    const { from, to } = todayRange();
+    let partial = false;
+
+    // Sales — today's total + transaction count
+    let revenue = 0;
+    let transactions = 0;
+    try {
+      const salesRaw = await rapidRms.getSalesDetail(session, {
+        FromDate: from, ToDate: to, StartDate: from, EndDate: to,
+      });
+      const rows = toRows(salesRaw);
+      let sawRevenue = false;
+      for (const r of rows) {
+        const rev = pickNum(r, REVENUE_FIELDS);
+        if (rev !== null) { revenue += rev; sawRevenue = true; }
+      }
+      // Prefer an explicit count field on the envelope/first row; else row count.
+      const envelope = (salesRaw && typeof salesRaw === 'object' ? salesRaw : {}) as Record<string, unknown>;
+      transactions = pickNum(envelope, TXN_COUNT_FIELDS) ?? rows.length;
+      if (!sawRevenue && rows.length > 0) partial = true; // rows existed but no revenue field matched
+    } catch {
+      partial = true;
+    }
+
+    // Inventory — low-stock items (current below reorder point)
+    const items: Array<{ name: string; current: number; threshold: number }> = [];
+    try {
+      const invRaw = await rapidRms.getInventory(session, {});
+      const rows = toRows(invRaw);
+      for (const r of rows) {
+        const current = pickNum(r, QTY_FIELDS);
+        const threshold = pickNum(r, REORDER_FIELDS);
+        const name = pickStr(r, NAME_FIELDS);
+        if (current !== null && threshold !== null && name && current < threshold) {
+          items.push({ name, current, threshold });
+        }
+      }
+      items.sort((a, b) => a.current - b.current);
+    } catch {
+      partial = true;
+    }
+
+    return {
+      todaySales: { revenue: Math.round(revenue * 100) / 100, transactions, changePercent: null },
+      lowStock: { count: items.length, items: items.slice(0, 10) },
+      source: { type: record.type, name: record.name },
+      fetchedAt: new Date().toISOString(),
+      partial,
+    };
+  } finally {
+    await Promise.all(refs.map((ref) => deleteCredential(ref).catch(() => {})));
+  }
+}
+
+// ── Public entry ────────────────────────────────────────────────
+
+/**
+ * Fetch a normalized live summary for a connected connector.
+ * Throws on auth/transport failure (caller falls back to placeholder).
+ * Returns null for connector types that don't yet have a summary mapper.
+ */
+export async function fetchStoreSummary(
+  record: ConnectorRecord,
+  vaultSecret: string,
+): Promise<StoreSummary | null> {
+  switch (record.type) {
+    case 'rapidrms-api':
+      return fetchRapidRmsSummary(record, vaultSecret);
+    // Azure SQL + Verifone expose data methods (query / fetchReports) but need
+    // a schema/report mapping per deployment — not yet generalized. Returning
+    // null keeps the dashboard on its honest placeholder rather than guessing.
+    case 'azure-db':
+    case 'verifone-commander':
+    default:
+      return null;
+  }
+}

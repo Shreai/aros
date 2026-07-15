@@ -46,6 +46,7 @@ import { testConnection as testRapidRmsConnector } from '../connectors/rapidrms-
 import { testConnection as testAzureDbConnector } from '../connectors/azure-db.js';
 import { testConnection as testVerifoneConnector } from '../connectors/verifone/connector.js';
 import { setTenantSecret, storeCredential, deleteCredential } from '../connectors/vault-ref.js';
+import { fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
 import { encryptValue, decryptValue, setEncryptionKey } from '../security/input-handler.js';
 
 const PORT = 5457;
@@ -1453,15 +1454,30 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
       recentActivity: activities,
     });
 
-    // Build response — real data where available, zeros for unconnected sources
+    // Pull live store data if a connector is actually connected (keyed off
+    // tenant_connectors, not the tenants.pos_system flag). Null → not
+    // connected (or fetch failed) → honest placeholder.
+    const storeSummary = await getTenantStoreSummary(tenantId);
+    const connected = storeSummary !== null;
+
+    // Build response — real store data when connected, placeholders otherwise
     const dashboard = {
-      todaySales: {
-        revenue: 0,
-        changePercent: 0,
-        _note: tenant?.pos_system ? undefined : 'Connect your POS system to see live sales data',
-      },
+      dataSource: connected
+        ? { live: true, connector: storeSummary!.source, fetchedAt: storeSummary!.fetchedAt, partial: storeSummary!.partial }
+        : { live: false },
+      todaySales: connected
+        ? {
+            revenue: storeSummary!.todaySales.revenue,
+            transactions: storeSummary!.todaySales.transactions,
+            changePercent: storeSummary!.todaySales.changePercent,
+          }
+        : {
+            revenue: 0,
+            changePercent: 0,
+            _note: 'Connect your store to see live sales data',
+          },
       activeAlerts: {
-        count: 0,
+        count: connected ? storeSummary!.lowStock.count : 0,
         critical: 0,
       },
       aiAgents: {
@@ -1469,11 +1485,13 @@ async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promi
         total: totalAgents || (tenant?.plan === 'free' ? 2 : tenant?.plan === 'starter' ? 5 : 10),
         statuses: Object.keys(statuses).length > 0 ? statuses : { available: totalAgents || 2 },
       },
-      lowStock: {
-        count: 0,
-        items: [] as Array<{ name: string; current: number; threshold: number }>,
-        _note: tenant?.pos_system ? undefined : 'Connect your POS system to see inventory alerts',
-      },
+      lowStock: connected
+        ? { count: storeSummary!.lowStock.count, items: storeSummary!.lowStock.items }
+        : {
+            count: 0,
+            items: [] as Array<{ name: string; current: number; threshold: number }>,
+            _note: 'Connect your store to see inventory alerts',
+          },
       humanLayer,
       recentActivity: recentActivity.length > 0 ? recentActivity : [
         {
@@ -1550,6 +1568,68 @@ function ensureConnectorCrypto(): void {
   const secret = process.env.AROS_ENCRYPTION_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (secret) setEncryptionKey(createHash('sha256').update(secret).digest());
   connectorCryptoReady = true;
+}
+
+/** Per-tenant vault key-derivation seed — used by both connector test and data fetch. */
+function vaultSecretFor(tenantId: string): string {
+  return `${tenantId}:${process.env.AROS_ENCRYPTION_KEY || 'aros-dev'}`;
+}
+
+// ── Live store summary (the connector → real-data read-back) ─────
+// Short in-memory TTL cache so a dashboard load doesn't re-auth the POS on
+// every request. Live pull is the default; a materialized snapshot table is
+// the scale path (see docs/store-data-flow.md).
+const STORE_SUMMARY_TTL_MS = 60_000;
+const storeSummaryCache = new Map<string, { at: number; summary: StoreSummary | null }>();
+
+/**
+ * Resolve a tenant's connected connector and return a normalized live summary,
+ * or null when the tenant has no connected connector (or its type has no
+ * summary mapper yet). Never throws — a fetch failure resolves to null so
+ * callers degrade to the honest placeholder.
+ */
+async function getTenantStoreSummary(tenantId: string): Promise<StoreSummary | null> {
+  const cached = storeSummaryCache.get(tenantId);
+  if (cached && Date.now() - cached.at < STORE_SUMMARY_TTL_MS) return cached.summary;
+
+  let summary: StoreSummary | null = null;
+  try {
+    const supabase = createSupabaseAdmin();
+    const { data: rows } = await supabase
+      .from('tenant_connectors')
+      .select(`${CONNECTOR_COLUMNS}, credentials_encrypted`)
+      .eq('tenant_id', tenantId)
+      .eq('status', 'connected')
+      // Prefer a POS (rapidrms) over a raw DB connector for the headline summary.
+      .order('type', { ascending: true })
+      .limit(5);
+
+    const row = (rows ?? []).find((r) => r.type === 'rapidrms-api') ?? (rows ?? [])[0];
+    if (row) {
+      ensureConnectorCrypto();
+      const secrets = JSON.parse(decryptValue(row.credentials_encrypted)) as Record<string, string>;
+      summary = await fetchStoreSummary(
+        { id: row.id, type: row.type, name: row.name, config: (row.config ?? {}) as Record<string, unknown>, secrets },
+        vaultSecretFor(tenantId),
+      );
+    }
+  } catch (err) {
+    console.error('[store-summary]', err instanceof Error ? err.message : err);
+    summary = null;
+  }
+
+  storeSummaryCache.set(tenantId, { at: Date.now(), summary });
+  return summary;
+}
+
+async function handleStoreSummary(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const summary = await getTenantStoreSummary(auth.tenantId);
+  if (!summary) {
+    return json(res, 200, { connected: false, summary: null });
+  }
+  json(res, 200, { connected: true, summary });
 }
 
 function validateConnectorInput(
@@ -1677,7 +1757,7 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
     const config = (row.config ?? {}) as Record<string, any>;
 
     // Bridge decrypted secrets into the connector vault for this test only.
-    setTenantSecret(`${auth.tenantId}:${process.env.AROS_ENCRYPTION_KEY || 'aros-dev'}`);
+    setTenantSecret(vaultSecretFor(auth.tenantId));
     const passwordRef = await storeCredential(`${row.id}:password`, secrets.password ?? '');
     refs.push(passwordRef);
 
@@ -1728,6 +1808,10 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
       })
       .eq('id', row.id);
 
+    // A newly-connected (or newly-broken) connector should reflect on the
+    // dashboard immediately, not after the summary TTL expires.
+    storeSummaryCache.delete(auth.tenantId);
+
     json(res, 200, { ok: true, result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Connection test failed';
@@ -1756,6 +1840,8 @@ async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse)
       .eq('id', id);
 
     if (error) throw error;
+
+    storeSummaryCache.delete(auth.tenantId);
 
     await auditLog({
       tenantId: auth.tenantId,
@@ -2154,6 +2240,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (pathname === '/api/connectors' && method === 'DELETE') {
     return handleConnectorsDelete(req, res);
+  }
+
+  // Live store data read-back — consumed by the dashboard and by the agent's
+  // store-data tool (registered on shre-router; see docs/store-data-flow.md).
+  if (pathname === '/api/store/summary' && method === 'GET') {
+    return handleStoreSummary(req, res);
   }
 
   if (pathname === '/api/marketplace/entitlements' && method === 'GET') {
