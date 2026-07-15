@@ -2038,6 +2038,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     });
   }
 
+  if (pathname.startsWith('/api/v1/')) {
+    req.url = pathname.slice('/api'.length) + requestUrl.search;
+    return proxyRequest(req, res, SHRE_ROUTER_URL);
+  }
+
   if (pathname.startsWith('/v1/') && !pathname.startsWith('/v1/traces/')) {
     return proxyRequest(req, res, SHRE_ROUTER_URL);
   }
