@@ -1475,6 +1475,22 @@ async function handleAppEntitlement(req: IncomingMessage, res: ServerResponse, a
 
 const RESOURCE_KINDS = new Set(['channel', 'pos', 'app', 'agent', 'skill', 'model']);
 
+async function handleModelEnrollment(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
+  const supabase = createSupabaseAdmin();
+  const token = randomBytes(32).toString('base64url');
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const now = new Date().toISOString();
+  await supabase.from('model_enrollments').update({ consumed_at: now }).eq('tenant_id', auth.tenantId).is('consumed_at', null);
+  const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
+  const { error } = await supabase.from('model_enrollments').insert({ tenant_id: auth.tenantId, model_id: DEFAULT_MODEL.id, token_hash: tokenHash, created_by: auth.userId, expires_at: expiresAt });
+  if (error) return json(res, 500, { error: 'Unable to create model enrollment' });
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'model.enrollment.created', resource: `model:${DEFAULT_MODEL.id}`, detail: { expiresAt }, ip: getClientIp(req) });
+  json(res, 201, { enrollmentToken: token, expiresAt, model: DEFAULT_MODEL.id });
+}
+
 async function handleTenantResources(req: IncomingMessage, res: ServerResponse, kind: string, id?: string): Promise<void> {
   const auth = await authenticateRequest(req);
   if (!auth) return json(res, 401, { error: 'Authentication required' });
@@ -2620,6 +2636,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   const resourceMatch = pathname.match(/^\/api\/resources\/(channel|pos|app|agent|skill|model)(?:\/([0-9a-f-]+))?$/);
   if (resourceMatch && ['GET', 'POST', 'PUT'].includes(method)) return handleTenantResources(req, res, resourceMatch[1], resourceMatch[2]);
+  if (pathname === '/api/models/enrollment' && method === 'POST') return handleModelEnrollment(req, res);
   if (pathname === '/api/apps' && method === 'GET') return handlePlatformApps(req, res);
   const appGrantMatch = pathname.match(/^\/api\/apps\/([a-z0-9-]+)\/grant$/);
   if (appGrantMatch && method === 'POST') return handlePlatformApps(req, res, appGrantMatch[1]);

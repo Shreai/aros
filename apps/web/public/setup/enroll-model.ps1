@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$gateway = 'https://llm.shre.ai'
+$gateway = 'https://keys.shre.ai'
 $vault = 'http://127.0.0.1:5473'
 $agentId = if ($env:SHRE_VAULT_STORE_AGENT) { $env:SHRE_VAULT_STORE_AGENT } else { 'shadow-ops' }
 
