@@ -3,12 +3,16 @@ import type { ActivationRequest, EventBatchRequest, HeartbeatRequest } from './c
 
 export interface DeviceIdentity { deviceId: string; tenantId: string; storeId: string; provider: string }
 export interface Enrollment extends DeviceIdentity { tokenId: string }
+export interface DeviceConfiguration {
+  mode: 'read_only'; syncIntervalSeconds: number; enabledReadCapabilities: string[]; configVersion: number;
+}
 
 export interface EdgeRepository {
   consumeActivation(codeHash: string, machineId: string, deviceId: string, tokenHash: string): Promise<Enrollment | null>;
   findDeviceByToken(tokenHash: string): Promise<DeviceIdentity | null>;
   recordHeartbeat(device: DeviceIdentity, heartbeat: HeartbeatRequest): Promise<void>;
   persistBatch(device: DeviceIdentity, batch: EventBatchRequest): Promise<Array<{ eventId: string; status: 'accepted' | 'duplicate' }>>;
+  getConfiguration(device: DeviceIdentity): Promise<DeviceConfiguration | null>;
 }
 
 export const hashSecret = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -46,5 +50,16 @@ export class EdgeService {
     }
     const events = await this.repository.persistBatch(device, input);
     return { batchId: input.batchId, events };
+  }
+
+  async configuration(device: DeviceIdentity) {
+    const configuration = await this.repository.getConfiguration(device);
+    if (!configuration) throw new Error('EDGE_DEVICE_NOT_FOUND');
+    return {
+      mode: 'read_only' as const,
+      syncIntervalSeconds: configuration.syncIntervalSeconds,
+      enabledReadCapabilities: configuration.enabledReadCapabilities.filter(capability => /^[a-z][a-z0-9_-]*\.read$/.test(capability)),
+      configVersion: configuration.configVersion,
+    };
   }
 }

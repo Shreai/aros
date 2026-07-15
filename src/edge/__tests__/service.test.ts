@@ -14,6 +14,10 @@ class FakeRepository implements EdgeRepository {
   async persistBatch(_device:DeviceIdentity, batch:EventBatchRequest) {
     return batch.events.map(event => { const duplicate=this.keys.has(event.idempotencyKey); this.keys.add(event.idempotencyKey); return {eventId:event.eventId,status:duplicate?'duplicate' as const:'accepted' as const}; });
   }
+  async getConfiguration(device:DeviceIdentity) {
+    if (this.revoked || device.tenantId !== this.device.tenantId || device.storeId !== this.device.storeId) return null;
+    return {mode:'read_only' as const,syncIntervalSeconds:300,enabledReadCapabilities:['catalog.read','price.write'],configVersion:2};
+  }
 }
 
 const event = { eventId:'event', eventType:'verifone.item.snapshot' as const, sourceId:'sku', sourceTimestamp:'2026-07-15T00:00:00Z', idempotencyKey:'sku:v1', payload:{} };
@@ -36,5 +40,10 @@ describe('EdgeService', () => {
   it('denies revoked device credentials', async () => {
     const repo=new FakeRepository(); const service=new EdgeService(repo); repo.revoked=true;
     expect(await service.authenticate('token.secret')).toBeNull();
+  });
+  it('returns only scoped read-only device configuration', async () => {
+    const repo=new FakeRepository(); const service=new EdgeService(repo);
+    expect(await service.configuration(repo.device)).toEqual({mode:'read_only',syncIntervalSeconds:300,enabledReadCapabilities:['catalog.read'],configVersion:2});
+    await expect(service.configuration({...repo.device,tenantId:'other'})).rejects.toThrow('EDGE_DEVICE_NOT_FOUND');
   });
 });

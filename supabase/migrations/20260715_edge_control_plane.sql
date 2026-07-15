@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS edge_devices (
   store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
   connector_id UUID REFERENCES pos_connections(id) ON DELETE SET NULL,
   provider TEXT NOT NULL, machine_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'enrolled',
+  sync_interval_seconds INTEGER NOT NULL DEFAULT 300,
+  enabled_read_capabilities TEXT[] NOT NULL DEFAULT ARRAY['catalog.read','transactions.read']::TEXT[],
+  config_version BIGINT NOT NULL DEFAULT 1,
   last_heartbeat_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ,
   UNIQUE (tenant_id, store_id, machine_id)
 );

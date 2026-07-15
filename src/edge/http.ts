@@ -15,17 +15,25 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 
 export async function handleEdgeRequest(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
   if (!pathname.startsWith('/v1/edge/')) return false;
-  if (req.method !== 'POST') { reply(res,405,{error:'method_not_allowed'}); return true; }
+  if (req.method !== 'POST' && !(pathname==='/v1/edge/config' && req.method==='GET')) { reply(res,405,{error:'method_not_allowed'}); return true; }
   const service=new EdgeService(new SupabaseEdgeRepository(createSupabaseAdmin()));
   try {
-    const input=await readBody(req);
     if(pathname==='/v1/edge/activate') {
+      const input=await readBody(req);
       if(!validateActivation(input)){ reply(res,400,{error:'invalid_activation'}); return true; }
       const activated=await service.activate(input); reply(res,activated?201:401,activated??{error:'invalid_or_expired_activation'}); return true;
     }
     const token=req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
     const device=token ? await service.authenticate(token) : null;
     if(!device){ reply(res,401,{error:'invalid_device_credential'}); return true; }
+    if(pathname==='/v1/edge/config') {
+      const configuration=await service.configuration(device);
+      const etag=`\"edge-config-${configuration.configVersion}\"`;
+      if(req.headers['if-none-match']===etag){ res.writeHead(304,{etag}); res.end(); return true; }
+      res.writeHead(200,{'content-type':'application/json',etag,'cache-control':'private, no-cache'});
+      res.end(JSON.stringify(configuration)); return true;
+    }
+    const input=await readBody(req);
     if(pathname==='/v1/edge/heartbeat') {
       if(!validateHeartbeat(input)){ reply(res,400,{error:'invalid_heartbeat'}); return true; }
       reply(res,202,await service.heartbeat(device,input)); return true;
@@ -39,6 +47,7 @@ export async function handleEdgeRequest(req: IncomingMessage, res: ServerRespons
     reply(res,404,{error:'not_found'}); return true;
   } catch(error) {
     if(error instanceof Error && error.message==='BODY_TOO_LARGE') reply(res,413,{error:'payload_too_large'});
+    else if(error instanceof Error && error.message==='EDGE_DEVICE_NOT_FOUND') reply(res,401,{error:'invalid_device_credential'});
     else if(error instanceof SyntaxError) reply(res,400,{error:'invalid_json'});
     else reply(res,500,{error:'edge_control_plane_failure'});
     return true;

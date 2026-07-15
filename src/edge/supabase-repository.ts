@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { EventBatchRequest, HeartbeatRequest } from './contracts.js';
-import type { DeviceIdentity, EdgeRepository, Enrollment } from './service.js';
+import type { DeviceConfiguration, DeviceIdentity, EdgeRepository, Enrollment } from './service.js';
 
 export class SupabaseEdgeRepository implements EdgeRepository {
   constructor(private readonly db: SupabaseClient) {}
@@ -38,5 +38,19 @@ export class SupabaseEdgeRepository implements EdgeRepository {
     });
     if (error) throw error;
     return (data ?? []).map((row: any) => ({ eventId: row.event_id, status: row.status as 'accepted' | 'duplicate' }));
+  }
+
+  async getConfiguration(device: DeviceIdentity): Promise<DeviceConfiguration | null> {
+    const { data, error } = await this.db.from('edge_devices')
+      .select('sync_interval_seconds,enabled_read_capabilities,config_version')
+      .eq('id', device.deviceId).eq('tenant_id', device.tenantId).eq('store_id', device.storeId)
+      .eq('provider', device.provider).is('revoked_at', null).maybeSingle();
+    if (error) throw error;
+    return data ? {
+      mode: 'read_only',
+      syncIntervalSeconds: data.sync_interval_seconds,
+      enabledReadCapabilities: data.enabled_read_capabilities ?? [],
+      configVersion: data.config_version,
+    } : null;
   }
 }
