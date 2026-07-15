@@ -34,7 +34,7 @@ try {
     scp (Join-Path $repo 'deploy/hostinger/deploy-bundle.sh') "${SshTarget}:$remoteScript"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to upload the release bundle.' }
 
-    ssh $SshTarget "chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteBundle' '$bundleRef'"
+    ssh $SshTarget "sed -i 's/\r$//' '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteBundle' '$bundleRef'"
     if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed or rolled back.' }
 
     $response = Invoke-WebRequest -Uri 'https://aros.live' -Method Head `
