@@ -196,7 +196,10 @@ function AuthenticatedRoutes({ path, isAdmin, onboarded }: { path: string; isAdm
     );
   }
 
-  const setupRoute = path.startsWith('/stores') ? <ConnectionsHub kind="pos" />
+  // Stores must use the server-backed connector flow. It encrypts credentials,
+  // persists multiple tenant accounts, and performs real provider tests; the
+  // generic connections dialog is reserved for app grants/OAuth connections.
+  const setupRoute = path.startsWith('/stores') ? <ConnectStorePage onboarded />
     : path.startsWith('/apps') ? <ConnectionsHub kind="app" />
     : path.startsWith('/channels') ? <CapabilityCatalog kind="channels" />
     : path.startsWith('/agents') ? <CapabilityCatalog kind="agents" />
