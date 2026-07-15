@@ -1,12 +1,15 @@
 -- AROS edge control plane v1. Tokens are stored only as SHA-256 hashes.
 CREATE TABLE IF NOT EXISTS edge_activation_tokens (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id UUID NOT NULL, store_id UUID NOT NULL,
-  connector_id UUID, provider TEXT NOT NULL DEFAULT 'verifone', code_hash TEXT NOT NULL UNIQUE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  connector_id UUID REFERENCES pos_connections(id) ON DELETE SET NULL, provider TEXT NOT NULL DEFAULT 'verifone', code_hash TEXT NOT NULL UNIQUE,
   expires_at TIMESTAMPTZ NOT NULL, max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts > 0),
   attempts INTEGER NOT NULL DEFAULT 0, consumed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS edge_devices (
-  id UUID PRIMARY KEY, tenant_id UUID NOT NULL, store_id UUID NOT NULL, connector_id UUID,
+  id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  connector_id UUID REFERENCES pos_connections(id) ON DELETE SET NULL,
   provider TEXT NOT NULL, machine_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'enrolled',
   last_heartbeat_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ,
   UNIQUE (tenant_id, store_id, machine_id)
@@ -31,6 +34,15 @@ CREATE TABLE IF NOT EXISTS edge_events (
   raw_payload_ref TEXT, received_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (device_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS edge_events_store_time_idx ON edge_events (tenant_id, store_id, source_timestamp DESC);
+
+-- These tables are accessed through tenant-authenticated server APIs or scoped
+-- SECURITY DEFINER functions. Never expose service-role data through PostgREST.
+ALTER TABLE edge_activation_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE edge_devices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE edge_device_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE edge_device_heartbeats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE edge_event_batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE edge_events ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION consume_edge_activation(p_code_hash TEXT, p_machine_id TEXT, p_device_id UUID, p_token_hash TEXT)
 RETURNS TABLE(device_id UUID, tenant_id UUID, store_id UUID, provider TEXT, token_id UUID)
