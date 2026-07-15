@@ -50,14 +50,21 @@ Server helper `getTenantStoreSummary(tenantId)`:
   off `tenant_connectors` (not the old `tenants.pos_system` guess) and, when
   connected, fills real `todaySales` + `lowStock` + a `dataSource:{live:true,…}`
   marker; otherwise the honest "Connect your store" zeros.
-- **Endpoint** `GET /api/store/summary` — **added here.** `{ connected, summary
-  }` for any surface (dashboard already uses the shared helper; the agent tool
-  below calls this).
-- **Agent tool** — *remaining, out of repo.* The agent runs in `shre-router`
-  (proxied via `/v1/*`). Register one tool there, e.g. `get_store_summary`,
-  that calls `GET https://app.aros.live/api/store/summary` with the tenant's
-  bearer, so non-demo chat answers from real numbers instead of `demoMode`
-  sample data. This repo exposes exactly the endpoint it needs.
+- **Endpoint** `GET /api/store/summary` — two auth paths:
+  - **user path** — a tenant's own Supabase bearer → only their own tenant
+    (dashboard uses the shared helper directly);
+  - **service path** — a trusted internal caller (shre-router) presents the
+    service token (`AROS_SERVICE_TOKEN`) + `X-Service-Source` + an explicit
+    `?tenantId=`. This endpoint is a *trusted data provider*, not the
+    tenant-authorization boundary: the caller (router) must have already
+    authorized the user for that tenant. Fail-closed — no token, no service
+    path.
+- **Agent** — the router's `data-source-resolver` `aros` branch now pre-fetches
+  the tenant's summary from the service path and injects it into the system
+  prompt (inert unless `AROS_APP_URL` + `AROS_SERVICE_TOKEN` are set). Gated by
+  the router's existing `canAccessData(agentId, tenantId, 'aros', '*')` grant;
+  the tenantId is the router's authorization-bound `tenantContextId`, never
+  model input. So non-demo AROS chat answers from real numbers.
 - **Sync cache** — *scale path.* Live pull + TTL is correct for one store /
   low traffic. For many stores or historical trends (e.g. real
   `changePercent`), add a scheduled job that snapshots `fetchStoreSummary`

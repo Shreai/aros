@@ -1622,14 +1622,69 @@ async function getTenantStoreSummary(tenantId: string): Promise<StoreSummary | n
   return summary;
 }
 
+/**
+ * Internal service token used by trusted services (e.g. shre-router's
+ * data-source-resolver) to fetch a *specific* tenant's summary. Read from env
+ * or the vault file; empty string disables the service path entirely
+ * (fail-closed — the user-bearer path still works).
+ */
+function readServiceToken(): string {
+  const candidates = [
+    process.env.AROS_SERVICE_TOKEN,
+    process.env.AROS_INTERNAL_TOKEN,
+    '/root/.shre/vault/aros-platform.token',
+    (process.env.HOME || '') + '/.shre/vault/aros-platform.token',
+  ].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    try {
+      if (!candidate.startsWith('/')) {
+        if (candidate.trim()) return candidate.trim();
+        continue;
+      }
+      if (existsSync(candidate)) {
+        const token = readFileSync(candidate, 'utf8').trim();
+        if (token) return token;
+      }
+    } catch { /* try next */ }
+  }
+  return '';
+}
+
+/** Length-checked constant-time-ish comparison — avoids early-exit token oracles. */
+function tokensMatch(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function handleStoreSummary(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // ── Service-to-service path ──────────────────────────────────
+  // A trusted internal caller (shre-router) may request a SPECIFIC tenant's
+  // summary with the service token + an explicit tenantId. That caller is
+  // responsible for having already authorized the end user for that tenant
+  // (the router does this via checkTenantBinding + canAccessData). This
+  // endpoint is a trusted data provider, NOT the tenant-authorization
+  // boundary — so the service path never runs off an end-user's identity.
+  const serviceToken = readServiceToken();
+  const presentedToken = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const claimsService = Boolean(req.headers['x-service-source']);
+  if (serviceToken && claimsService && tokensMatch(presentedToken, serviceToken)) {
+    const tenantId = getRequestUrl(req).searchParams.get('tenantId');
+    if (!tenantId) {
+      return json(res, 400, { error: 'tenantId query param required for service requests' });
+    }
+    const summary = await getTenantStoreSummary(tenantId);
+    return json(res, 200, summary ? { connected: true, summary } : { connected: false, summary: null });
+  }
+
+  // ── End-user path ────────────────────────────────────────────
+  // A user's Supabase bearer resolves ONLY to their own tenant — a user can
+  // never request another tenant's summary here.
   const auth = await authenticateRequest(req);
   if (!auth) return json(res, 401, { error: 'Authentication required' });
   const summary = await getTenantStoreSummary(auth.tenantId);
-  if (!summary) {
-    return json(res, 200, { connected: false, summary: null });
-  }
-  json(res, 200, { connected: true, summary });
+  json(res, 200, summary ? { connected: true, summary } : { connected: false, summary: null });
 }
 
 function validateConnectorInput(
