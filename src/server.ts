@@ -49,6 +49,10 @@ import { setTenantSecret, storeCredential, deleteCredential } from '../connector
 import { fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
 import { replicateSnapshotToCortex } from '../connectors/cortex-bridge.js';
 import { encryptValue, decryptValue, setEncryptionKey } from '../security/input-handler.js';
+import { handleEdgeRequest } from './edge/http.js';
+import { handleEdgeProvisioningRequest } from './edge/provisioning-http.js';
+import { EdgeProvisioningService } from './edge/provisioning.js';
+import { SupabaseEdgeProvisioningRepository } from './edge/supabase-provisioning-repository.js';
 
 const PORT = 5457;
 const startedAt = new Date().toISOString();
@@ -2403,6 +2407,15 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (url === '/api/human/connectors/activate' && method === 'POST') {
     return handleActivateHumanConnectors(req, res);
+  }
+
+  if (pathname.startsWith('/v1/edge/') && await handleEdgeRequest(req, res, pathname)) return;
+
+  if (pathname.startsWith('/api/edge/')) {
+    const auth = await authenticateRequest(req);
+    if (!auth) return json(res, 401, { error: 'Unauthorized' });
+    const edgeProvisioning = new EdgeProvisioningService(new SupabaseEdgeProvisioningRepository(createSupabaseAdmin()));
+    if (await handleEdgeProvisioningRequest(req, res, pathname, auth, edgeProvisioning)) return;
   }
 
   // ── Store Connectors (authenticated) ─────────────────────
