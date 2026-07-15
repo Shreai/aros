@@ -2376,6 +2376,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     });
   }
 
+  // Device-scoped Edge traffic is served by this control plane. Keep this
+  // ahead of the generic /v1 router proxy or enrollment and heartbeats are
+  // forwarded to shre-router and return its unrelated 404 response.
+  if (pathname.startsWith('/v1/edge/') && await handleEdgeRequest(req, res, pathname)) return;
+
   if (pathname.startsWith('/api/v1/')) {
     req.url = pathname.slice('/api'.length) + requestUrl.search;
     return proxyRequest(req, res, SHRE_ROUTER_URL);
@@ -2476,8 +2481,6 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (url === '/api/human/connectors/activate' && method === 'POST') {
     return handleActivateHumanConnectors(req, res);
   }
-
-  if (pathname.startsWith('/v1/edge/') && await handleEdgeRequest(req, res, pathname)) return;
 
   if (pathname.startsWith('/api/edge/')) {
     const auth = await authenticateRequest(req);
