@@ -37,12 +37,14 @@ try {
     ssh $SshTarget "sed -i 's/\r$//' '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteBundle' '$bundleRef'"
     if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed or rolled back.' }
 
-    $response = Invoke-WebRequest -Uri 'https://aros.live' -Method Head `
+    # app.aros.live is the deployed platform on :5457; aros.live is the
+    # separate public/marketing service and cannot validate this release.
+    $response = Invoke-WebRequest -Uri 'https://app.aros.live/readyz' -Method Get `
         -MaximumRedirection 5 -TimeoutSec 30 -UseBasicParsing
     if ($response.StatusCode -ne 200) {
         throw "Public health check returned HTTP $($response.StatusCode)."
     }
-    Write-Host "AROS direct deployment passed: $Ref -> https://aros.live"
+    Write-Host "AROS direct deployment passed: $Ref -> https://app.aros.live"
 }
 finally {
     Remove-Item -LiteralPath $bundle -Force -ErrorAction SilentlyContinue
