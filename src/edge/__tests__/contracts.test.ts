@@ -14,6 +14,7 @@ describe('edge contracts', () => {
   });
   it('accepts a typed batch and rejects unknown event types', () => {
     expect(validateEventBatch(batch)).toBe(true);
+    expect(validateEventBatch({ ...batch, events:[{ ...event, eventType:'verifone.sync.tick' }] })).toBe(true);
     expect(validateEventBatch({ ...batch, events:[{ ...event, eventType:'commander.password' }] })).toBe(false);
   });
   it('enforces the 500-event request bound', () => {

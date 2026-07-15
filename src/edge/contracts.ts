@@ -11,6 +11,9 @@ export const EDGE_EVENT_TYPES = [
   'verifone.fuel.price',
   'verifone.report.raw',
   'verifone.connector.error',
+  // Transitional compatibility event emitted by the current CStoreSKU bridge.
+  // Remove after the bridge emits domain-specific snapshot/transaction events.
+  'verifone.sync.tick',
 ] as const;
 
 export type EdgeEventType = (typeof EDGE_EVENT_TYPES)[number];
