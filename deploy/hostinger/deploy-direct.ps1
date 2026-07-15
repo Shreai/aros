@@ -15,6 +15,11 @@ if ($dirty) {
 
 git rev-parse --verify "$Ref^{commit}" *> $null
 if ($LASTEXITCODE -ne 0) { throw "Unknown git ref: $Ref" }
+$bundleRef = (git rev-parse --symbolic-full-name $Ref).Trim()
+if (-not $bundleRef) { $bundleRef = $Ref }
+if ($bundleRef -notmatch '^refs/[A-Za-z0-9._/-]+$') {
+    throw "Ref must resolve to a named branch or tag: $Ref"
+}
 
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
 $bundle = Join-Path $env:TEMP "aros-direct-$stamp.bundle"
@@ -29,7 +34,7 @@ try {
     scp (Join-Path $repo 'deploy/hostinger/deploy-bundle.sh') "${SshTarget}:$remoteScript"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to upload the release bundle.' }
 
-    ssh $SshTarget "chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteBundle' HEAD"
+    ssh $SshTarget "chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteBundle' '$bundleRef'"
     if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed or rolled back.' }
 
     $response = Invoke-WebRequest -Uri 'https://aros.live' -Method Head `
