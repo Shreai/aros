@@ -776,7 +776,8 @@ async function handleOnboardingComplete(req: IncomingMessage, res: ServerRespons
     // activation codes + POS connections to a store id (stores.id), so the
     // connect-POS onboarding step needs one to attach to. Reuse an existing
     // store if present; otherwise create a default. Non-fatal — onboarding still
-    // completes if store creation fails (the step can create one later).
+    // cannot complete without a store binding; connector credentials and edge
+    // devices must never be orphaned from the tenant's store boundary.
     let storeId: string | null = null;
     try {
       const { data: existing } = await supabase
@@ -802,11 +803,13 @@ async function handleOnboardingComplete(req: IncomingMessage, res: ServerRespons
           })
           .select('id')
           .single();
-        if (storeError) console.error('[onboarding/complete] store create', storeError.message);
-        else storeId = (created?.id as string) ?? null;
+        if (storeError) throw storeError;
+        storeId = (created?.id as string) ?? null;
+        if (!storeId) throw new Error('Default store creation returned no id');
       }
     } catch (storeErr) {
       console.error('[onboarding/complete] store ensure', storeErr instanceof Error ? storeErr.message : storeErr);
+      throw storeErr;
     }
 
     await auditLog({

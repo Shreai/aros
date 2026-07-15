@@ -275,7 +275,9 @@ export function OnboardingPage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session?.access_token || ''}`,
         },
-        body: JSON.stringify({ storeId, connectorId: 'verifone', expiresInMinutes: 1440 }),
+        // connectorId is an optional pos_connections UUID, not a provider name.
+        // First-time setup binds this short-lived code directly to the store.
+        body: JSON.stringify({ storeId, expiresInMinutes: 60 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not generate an activation code.');
@@ -299,7 +301,7 @@ export function OnboardingPage() {
         );
         if (!res.ok) return;
         const data = await res.json().catch(() => ({}));
-        if (active && (data.connected || data.deviceConnected || data.status === 'connected')) {
+        if (active && data.state === 'connected') {
           setPosConnected(true);
         }
       } catch {
@@ -654,10 +656,7 @@ export function OnboardingPage() {
                     </div>
                     <ol style={{ fontSize: 13, color: '#374151', paddingLeft: 18, margin: 0, lineHeight: 1.7 }}>
                       <li>
-                        Install the edge app on a store computer:{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/win" style={styles.link} target="_blank" rel="noopener">Windows</a>,{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/mac" style={styles.link} target="_blank" rel="noopener">macOS</a>,{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/linux" style={styles.link} target="_blank" rel="noopener">Linux</a>.
+                        Open the <a href="/verifone/download.html" style={styles.link} target="_blank" rel="noopener">Edge Relay installer</a> on a store computer and choose its operating system.
                       </li>
                       <li>In the setup wizard, enter your Commander IP (usually <code>192.168.31.11</code>) and credentials — they stay on-site.</li>
                       <li>Paste the activation code above to link it to this store.</li>
@@ -685,7 +684,7 @@ export function OnboardingPage() {
             {selectedPos === 'rapidrms' && (
               <div style={{ fontSize: 13, color: '#374151' }}>
                 RapidRMS connects with your store credentials. Continue to your
-                dashboard and open <strong>Connectors → RapidRMS</strong> to finish.
+                dashboard and open <strong>Stores &amp; POS → Connect POS → RapidRMS</strong> to finish.
               </div>
             )}
 
