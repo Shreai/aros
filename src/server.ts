@@ -49,6 +49,7 @@ import { setTenantSecret, storeCredential, deleteCredential } from '../connector
 import { fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
 import { encryptValue, decryptValue, setEncryptionKey } from '../security/input-handler.js';
 import { getTrustedClientIp, isPublicRouterPath } from './api-security.js';
+import Redis from 'ioredis';
 
 const PORT = 5457;
 const startedAt = new Date().toISOString();
@@ -57,6 +58,8 @@ const SHRE_TASKS_URL = process.env.SHRE_TASKS_URL || 'http://127.0.0.1:5460';
 const SHRE_ROUTER_URL = process.env.SHRE_ROUTER_URL || 'http://127.0.0.1:5497';
 const WEB_DIST = process.env.AROS_WEB_DIST || join(process.cwd(), 'apps', 'web', 'dist');
 const TRUST_PROXY = process.env.AROS_TRUST_PROXY === '1' || process.env.AROS_TRUST_PROXY === 'true';
+const REDIS_URL = process.env.REDIS_URL
+  || (process.env.REDIS_PASSWORD ? `redis://:${encodeURIComponent(process.env.REDIS_PASSWORD)}@127.0.0.1:6379` : '');
 
 // ── Platform Integrations ────────────────────────────────────────
 const eventBus = createEventBus('aros-platform');
@@ -220,9 +223,41 @@ async function parseJsonBody(req: IncomingMessage): Promise<Record<string, unkno
 // ── Rate Limiter (per-IP, in-memory) ────────────────────────────
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+let rateLimitRedis: Redis | null = null;
 
-function rateLimit(req: IncomingMessage, maxRequests: number, windowMs: number): boolean {
+function getRateLimitRedis(): Redis | null {
+  if (!REDIS_URL) return null;
+  if (!rateLimitRedis) {
+    rateLimitRedis = new Redis(REDIS_URL, {
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      connectTimeout: 1_000,
+      maxRetriesPerRequest: 1,
+    });
+    rateLimitRedis.on('error', () => { /* local fallback below */ });
+  }
+  return rateLimitRedis;
+}
+
+async function rateLimit(req: IncomingMessage, maxRequests: number, windowMs: number): Promise<boolean> {
   const ip = getClientIp(req);
+  const redis = getRateLimitRedis();
+  if (redis) {
+    try {
+      if (redis.status === 'wait') await redis.connect();
+      const key = `aros:rate:${maxRequests}:${windowMs}:${ip}`;
+      const count = await redis.eval(
+        "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('PEXPIRE',KEYS[1],ARGV[1]) end; return n",
+        1,
+        key,
+        windowMs,
+      ) as number;
+      return count <= maxRequests;
+    } catch {
+      // Preserve availability if Redis is temporarily unavailable. The local
+      // limiter still provides a per-process safety net.
+    }
+  }
   const now = Date.now();
   const bucket = rateBuckets.get(ip);
 
@@ -831,7 +866,7 @@ async function ensureSignupTenant(
 }
 
 async function handleSignup(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (!rateLimit(req, 5, 60_000)) {
+  if (!(await rateLimit(req, 5, 60_000))) {
     return json(res, 429, { error: 'Too many signup attempts. Please wait a minute.' });
   }
 
@@ -2173,14 +2208,14 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   // ── Email Verification ────────────────────────────────────
   if (url === '/api/auth/email-otp/send-verification-otp' && method === 'POST') {
-    if (!rateLimit(req, 3, 60_000)) {
+    if (!(await rateLimit(req, 3, 60_000))) {
       return json(res, 429, { error: 'Too many requests. Please wait.' });
     }
     return handleSendOtp(req, res);
   }
 
   if (url === '/api/auth/email-otp/verify-email' && method === 'POST') {
-    if (!rateLimit(req, 10, 60_000)) {
+    if (!(await rateLimit(req, 10, 60_000))) {
       return json(res, 429, { error: 'Too many attempts. Please wait.' });
     }
     return handleVerifyOtp(req, res);
@@ -2284,7 +2319,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   // ── Lead capture (public, no auth) ──────────────────────
   if (url === '/api/leads' && method === 'POST') {
-    if (!rateLimit(req, 10, 60_000)) {
+    if (!(await rateLimit(req, 10, 60_000))) {
       return json(res, 429, { error: 'Too many requests. Please wait.' });
     }
     return handleLeadCapture(req, res);
@@ -2292,7 +2327,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   // ── Login (brute-force protected) ─────────────────────────
   if (url === '/api/login' && method === 'POST') {
-    if (!rateLimit(req, 10, 60_000)) {
+    if (!(await rateLimit(req, 10, 60_000))) {
       return json(res, 429, { error: 'Too many requests. Please wait.' });
     }
     return handleLogin(req, res);
