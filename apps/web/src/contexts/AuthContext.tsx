@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { centralIdentityOnly, supabase } from '../lib/supabase';
 
 const API_BASE = (window as any).__AROS_API_URL__
   || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
@@ -172,6 +172,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [session]);
 
   useEffect(() => {
+    if (centralIdentityOnly) {
+      setLoading(false);
+      return;
+    }
     supabase.auth.getSession()
       .then(({ data: { session: s } }) => hydrateUserAndSettle(s))
       .catch(() => {
@@ -199,6 +203,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [memberships]);
 
   const signIn = useCallback(async (email: string, password: string) => {
+    if (centralIdentityOnly) return { error: 'Use the central AROS sign-in flow.' };
     try {
       const res = await fetch(`${API_BASE}/api/login`, {
         method: 'POST',
@@ -221,6 +226,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signUp = useCallback(async (email: string, password: string, metadata: Record<string, string>) => {
+    if (centralIdentityOnly) return { error: 'Use the central AROS signup flow.' };
     const { error } = await supabase.auth.signUp({
       email,
       password,

@@ -19,10 +19,12 @@ cd "$(dirname "$0")/.."   # repo root
 IMAGE="${AROS_IMAGE:-ghcr.io/shreai/shreai/aros}"
 TAG="latest"
 PUSH=0
+AUTH_MODE="legacy"
 while [ $# -gt 0 ]; do
   case "$1" in
     --push) PUSH=1 ;;
     --tag) TAG="$2"; shift ;;
+    --identity) AUTH_MODE="central" ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -31,7 +33,8 @@ done
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 export VITE_SUPABASE_URL="${VITE_SUPABASE_URL:-${SUPABASE_URL:-}}"
 export VITE_SUPABASE_ANON_KEY="${VITE_SUPABASE_ANON_KEY:-${SUPABASE_ANON_KEY:-}}"
-if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+export VITE_AUTH_MODE="$AUTH_MODE"
+if [ "$AUTH_MODE" = "legacy" ] && { [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; }; then
   echo "ERROR: VITE_SUPABASE_URL/SUPABASE_URL and VITE_SUPABASE_ANON_KEY/SUPABASE_ANON_KEY" >&2
   echo "       must be set in the environment or repo-root .env before building." >&2
   exit 1
@@ -41,12 +44,14 @@ echo "==> Building apps/web/dist (supabase url: ${VITE_SUPABASE_URL})"
 [ -d apps/web/node_modules ] || pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 ( cd apps/web && pnpm build )
 
-echo "==> Verifying Supabase URL baked into the bundle"
-grep -rqlE "supabase\.co" apps/web/dist/assets/*.js \
-  || { echo "ERROR: built dist has no Supabase URL — aborting." >&2; exit 1; }
+if [ "$AUTH_MODE" = "legacy" ]; then
+  echo "==> Verifying Supabase URL baked into the bundle"
+  grep -rqlE "supabase\.co" apps/web/dist/assets/*.js \
+    || { echo "ERROR: built dist has no Supabase URL — aborting." >&2; exit 1; }
+fi
 
 echo "==> Packaging image ${IMAGE}:${TAG}"
-docker build -f deploy/Dockerfile.web -t "${IMAGE}:${TAG}" .
+docker build --build-arg AUTH_MODE="$AUTH_MODE" -f deploy/Dockerfile.web -t "${IMAGE}:${TAG}" .
 
 if [ "$PUSH" = "1" ]; then
   echo "==> Pushing ${IMAGE}:${TAG}"

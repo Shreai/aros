@@ -27,10 +27,11 @@ export default defineConfig(({ command, mode }) => {
   // which must never be inlined into a browser bundle.
   const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL || '';
   const supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANON_KEY || '';
+  const authMode = env.VITE_AUTH_MODE === 'central' ? 'central' : 'legacy';
 
   // Fail the build loudly instead of shipping a bundle that throws
   // "supabaseUrl is required" at load and renders a blank white page.
-  if (command === 'build' && (!supabaseUrl || !supabaseAnonKey)) {
+  if (command === 'build' && authMode === 'legacy' && (!supabaseUrl || !supabaseAnonKey)) {
     throw new Error(
       '[aros-web] Refusing to build: VITE_SUPABASE_URL/SUPABASE_URL and ' +
       'VITE_SUPABASE_ANON_KEY/SUPABASE_ANON_KEY must be set (looked in ' +
@@ -45,6 +46,7 @@ export default defineConfig(({ command, mode }) => {
     define: {
       'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(supabaseUrl),
       'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(supabaseAnonKey),
+      'import.meta.env.VITE_AUTH_MODE': JSON.stringify(authMode),
     },
     server: {
       port: getPort(),

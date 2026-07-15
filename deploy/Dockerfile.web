@@ -12,13 +12,14 @@
 # so an in-container install fails. Building on the host (or CI runner, which
 # has the workspace resolved) and copying the artifact is the reliable path.
 FROM node:20-alpine AS production
+ARG AUTH_MODE=legacy
 WORKDIR /app
 ENV NODE_ENV=production
 
 # Fail the image build if the dist wasn't produced with Supabase config baked
 # in (guards against packaging a blank-page bundle).
 COPY apps/web/dist ./dist
-RUN grep -rqlE "supabase\.co" ./dist/assets/*.js || \
+RUN [ "$AUTH_MODE" = "central" ] || grep -rqlE "supabase\.co" ./dist/assets/*.js || \
     (echo "ERROR: apps/web/dist has no Supabase URL baked in — rebuild with deploy/build-aros-web.sh" && exit 1)
 
 COPY aros.config.json ./aros.config.json

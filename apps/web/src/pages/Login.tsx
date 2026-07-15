@@ -1,6 +1,10 @@
 import { useState, FormEvent } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { safeReturnTo } from '../app-registry';
+import { hostedAuth, safeIssuerReturnTo, type HostedChallenge, type HostedWorkspace } from '../lib/hosted-auth';
+
+const AUTH_BASE = (window as any).__SHRE_AUTH_URL__
+  || (window.location.hostname === 'localhost' ? 'http://localhost:5455' : '');
 
 export function Login() {
   const { signIn } = useAuth();
@@ -8,10 +12,16 @@ export function Login() {
   const justRegistered = params.get('registered') === 'true';
   const prefillEmail = params.get('email') || '';
   const returnTo = safeReturnTo(params.get('returnTo'));
+  const issuerReturnTo = safeIssuerReturnTo(params.get('return_to'));
+  const hosted = issuerReturnTo !== null;
   const [email, setEmail] = useState(prefillEmail);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [tempToken, setTempToken] = useState('');
+  const [workspaces, setWorkspaces] = useState<HostedWorkspace[]>([]);
+  const [challenge, setChallenge] = useState<HostedChallenge | null>(null);
+  const [code, setCode] = useState('');
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -19,17 +29,47 @@ export function Login() {
     setLoading(true);
 
     try {
+      if (hosted) {
+        const result = await hostedAuth.login(AUTH_BASE, email, password);
+        if ('requiresWorkspaceSelection' in result) {
+          setTempToken(result.tempToken);
+          setWorkspaces(result.workspaces);
+        } else {
+          setChallenge(result);
+        }
+        return;
+      }
       const { error: err } = await signIn(email, password);
       if (err) {
         setError(err);
         return;
       }
       window.location.href = returnTo;
-    } catch {
-      setError('Network error. Please try again.');
+    } catch (cause) {
+      setError(hosted && cause instanceof Error ? cause.message : 'Network error. Please try again.');
     } finally {
       setLoading(false);
     }
+  }
+
+  async function chooseWorkspace(workspaceId: string) {
+    setError(''); setLoading(true);
+    try { setChallenge(await hostedAuth.selectWorkspace(AUTH_BASE, tempToken, workspaceId)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not select workspace'); }
+    finally { setLoading(false); }
+  }
+
+  async function verifyCode(e: FormEvent) {
+    e.preventDefault();
+    if (!challenge || !issuerReturnTo) return;
+    setError(''); setLoading(true);
+    try {
+      await hostedAuth.verifyTwoFactor(AUTH_BASE, challenge, code);
+      // The API has now set the issuer-scoped HttpOnly cookie. Resume only the
+      // validated internal authorize request; its own client registry controls the callback.
+      window.location.assign(issuerReturnTo);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Verification failed'); }
+    finally { setLoading(false); }
   }
 
   return (
@@ -49,7 +89,29 @@ export function Login() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} style={styles.form}>
+          {hosted && <p style={{ fontSize: 13, color: '#6b7280', textAlign: 'center', marginTop: -12 }}>Sign in once to continue securely to your app.</p>}
+
+          {workspaces.length > 0 && !challenge ? (
+            <div style={styles.form}>
+              <div style={styles.label}>Choose a workspace</div>
+              {workspaces.map(workspace => (
+                <button key={workspace.id} type="button" disabled={loading} style={styles.button} onClick={() => void chooseWorkspace(workspace.id)}>
+                  {workspace.name} · {workspace.role}
+                </button>
+              ))}
+              {error && <div style={styles.error}>{error}</div>}
+            </div>
+          ) : challenge ? (
+            <form onSubmit={verifyCode} style={styles.form}>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>Enter the code sent to {challenge.destination}.</p>
+              <div style={styles.field}>
+                <label style={styles.label}>Verification code</label>
+                <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" required minLength={6} style={styles.input} autoFocus />
+              </div>
+              {error && <div style={styles.error}>{error}</div>}
+              <button type="submit" disabled={loading || code.length !== 6} style={loading ? { ...styles.button, opacity: 0.6 } : styles.button}>{loading ? 'Verifying...' : 'Verify & Continue'}</button>
+            </form>
+          ) : <form onSubmit={handleSubmit} style={styles.form}>
             <div style={styles.field}>
               <label style={styles.label}>Email</label>
               <input
@@ -89,11 +151,11 @@ export function Login() {
             >
               {loading ? 'Signing in...' : 'Sign In'}
             </button>
-          </form>
+          </form>}
 
           <p style={styles.footer}>
             Don't have an account?{' '}
-            <a href={`/signup?returnTo=${encodeURIComponent(returnTo)}`} style={styles.link}>Create one</a>
+            <a href={hosted ? `/signup?return_to=${encodeURIComponent(issuerReturnTo!)}` : `/signup?returnTo=${encodeURIComponent(returnTo)}`} style={styles.link}>Create one</a>
           </p>
         </div>
 

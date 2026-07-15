@@ -25,6 +25,7 @@ import { AdministrationPage } from '../pages/settings/AdministrationPage';
 import AIModelsSettings from '../pages/settings/AIModels';
 import { CapabilityCatalog } from '../pages/settings/CapabilityCatalog';
 import { ConnectionHealth } from '../pages/settings/ConnectionHealth';
+import { centralIdentityOnly } from '../lib/supabase';
 
 const MARKETPLACE_ADMIN_URL = (window as any).__MARKETPLACE_URL__
   ? `${(window as any).__MARKETPLACE_URL__}/admin`
@@ -45,9 +46,16 @@ function AppContent() {
   const isAdmin = user?.app_metadata?.role === 'admin' || user?.app_metadata?.role === 'superadmin';
   const onboarded = isOnboardingComplete(tenant);
 
+  if (centralIdentityOnly && path !== '/login' && path !== '/signup') {
+    const authorize = path === '/oauth/authorize' ? `${path}${window.location.search}` : null;
+    window.location.replace(authorize ? `/login?return_to=${encodeURIComponent(authorize)}` : '/login');
+    return null;
+  }
+
   // ── Public auth pages (no session required) ────────────────
   if (path === '/login') {
-    if (session && !loading) {
+    const isHostedResume = new URLSearchParams(window.location.search).has('return_to');
+    if (session && !loading && !isHostedResume) {
       // New users land in the value-first demo chat (/start), not the wizard.
       window.location.href = onboarded ? '/dashboard' : '/start';
       return null;

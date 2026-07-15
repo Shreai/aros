@@ -1,8 +1,12 @@
 import { useState, FormEvent } from 'react';
 import { safeReturnTo } from '../app-registry';
+import { safeIssuerReturnTo } from '../lib/hosted-auth';
+import { hostedAuth, type HostedChallenge } from '../lib/hosted-auth';
 
 const API_BASE = (window as any).__AROS_API_URL__
   || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
+const AUTH_BASE = (window as any).__SHRE_AUTH_URL__
+  || (window.location.hostname === 'localhost' ? 'http://localhost:5455' : '');
 
 // One question instead of a config wizard: what the operator wants their agent
 // to do. This single answer seeds sensible model/tool defaults downstream — the
@@ -33,6 +37,10 @@ function validatePhone(phone: string): boolean {
 
 export function Signup() {
   const returnTo = safeReturnTo(new URLSearchParams(window.location.search).get('returnTo'));
+  const issuerReturnTo = safeIssuerReturnTo(new URLSearchParams(window.location.search).get('return_to'));
+  const loginQuery = issuerReturnTo
+    ? `return_to=${encodeURIComponent(issuerReturnTo)}`
+    : `returnTo=${encodeURIComponent(returnTo)}`;
   const [step, setStep] = useState<Step>('form');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -47,6 +55,7 @@ export function Signup() {
   const [otp, setOtp] = useState('');
   const [otpError, setOtpError] = useState('');
   const [otpSending, setOtpSending] = useState(false);
+  const [hostedChallenge, setHostedChallenge] = useState<HostedChallenge | null>(null);
 
   // Password strength indicator
   const pwChecks = {
@@ -81,6 +90,15 @@ export function Signup() {
     setLoading(true);
 
     try {
+      if (issuerReturnTo) {
+        const challenge = await hostedAuth.signup(AUTH_BASE, {
+          email, password, name: fullName, workspaceName: company,
+          ...(phone ? { phoneNumber: phone } : {}),
+        });
+        setHostedChallenge(challenge);
+        setStep('verify');
+        return;
+      }
       const res = await fetch(`${API_BASE}/api/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,7 +120,10 @@ export function Signup() {
       }
 
       // Account created with email auto-confirmed server-side — go to login
-      window.location.href = `/login?registered=true&email=${encodeURIComponent(email)}&returnTo=${encodeURIComponent(returnTo)}`;
+      if (data.model?.enrollmentToken) {
+        sessionStorage.setItem('aros-model-enrollment-token', String(data.model.enrollmentToken));
+      }
+      window.location.href = `/login?registered=true&email=${encodeURIComponent(email)}&${loginQuery}`;
       return;
     } catch {
       setError('Network error. Please try again.');
@@ -138,6 +159,11 @@ export function Signup() {
     setLoading(true);
 
     try {
+      if (hostedChallenge && issuerReturnTo) {
+        await hostedAuth.verifyTwoFactor(AUTH_BASE, hostedChallenge, otp);
+        window.location.assign(issuerReturnTo);
+        return;
+      }
       const res = await fetch(`${API_BASE}/api/auth/email-otp/verify-email`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -167,7 +193,7 @@ export function Signup() {
           <div style={styles.card}>
             <h2 style={styles.cardTitle}>Verify your email</h2>
             <p style={{ fontSize: 14, color: '#6b7280', textAlign: 'center', marginBottom: 24, lineHeight: 1.5 }}>
-              We sent a 6-digit code to <strong style={{ color: '#1a1a2e' }}>{email}</strong>
+              We sent a 6-digit code to <strong style={{ color: '#1a1a2e' }}>{hostedChallenge?.destination || email}</strong>
             </p>
 
             <form onSubmit={handleVerify} style={styles.form}>
@@ -192,7 +218,7 @@ export function Signup() {
                 {loading ? 'Verifying...' : 'Verify & Continue'}
               </button>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              {!hostedChallenge && <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <button
                   type="button"
                   onClick={sendOtp}
@@ -208,7 +234,7 @@ export function Signup() {
                 >
                   Skip for now
                 </button>
-              </div>
+              </div>}
             </form>
           </div>
         </div>
@@ -218,7 +244,7 @@ export function Signup() {
 
   // ── Step: Done ──────────────────────────────────────────────
   if (step === 'done') {
-    window.location.href = `/login?registered=true&email=${encodeURIComponent(email)}`;
+    window.location.href = `/login?registered=true&email=${encodeURIComponent(email)}&${loginQuery}`;
     return null;
   }
 
@@ -365,7 +391,7 @@ export function Signup() {
 
           <p style={styles.footer}>
             Already have an account?{' '}
-            <a href="/login" style={styles.link}>Sign in</a>
+            <a href={`/login?${loginQuery}`} style={styles.link}>Sign in</a>
           </p>
         </div>
 
