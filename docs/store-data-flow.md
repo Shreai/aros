@@ -58,17 +58,21 @@ Server helper `getTenantStoreSummary(tenantId)`:
   that calls `GET https://app.aros.live/api/store/summary` with the tenant's
   bearer, so non-demo chat answers from real numbers instead of `demoMode`
   sample data. This repo exposes exactly the endpoint it needs.
-- **Sync cache** — *scale path.* Live pull + TTL is correct for one store /
-  low traffic. For many stores or historical trends (e.g. real
-  `changePercent`), add a scheduled job that snapshots `fetchStoreSummary`
-  into a `store_snapshots` table and have the dashboard/agent read that. The
-  `TaskScheduler` in `tasks/scheduler.ts` is the natural host (it is not
-  currently started).
+- **Warehouse (`store_snapshots`)** — **added here.** A scheduled snapshotter
+  (`captureStoreSnapshots`, env-gated by `STORE_SNAPSHOT_INTERVAL_MIN`, off by
+  default) pulls each connected connector's summary and upserts one row per
+  tenant per `business_date` into `store_snapshots` (aros Supabase). This gives
+  the self-serve path **history** — so it stops being live-pull-only and
+  converges with the warehouse-backed internal stores. `changePercent` is now
+  computed from the same-weekday-last-week snapshot (`weekOverWeekChange`),
+  null until a week of history exists. A downstream bridge could replicate
+  these snapshots into cortexdb for cross-platform analytics/RAG parity with
+  the internal `rapidrms.branches` path — deliberately left as a separate step
+  (avoids coupling the Supabase-backed app to cortexdb).
 
 ## What is deliberately NOT done yet
-- `changePercent` is `null` — a real comparison needs the prior-period pull
-  (doubles latency + shape risk); belongs with the snapshot cache.
 - Azure SQL / Verifone summaries — need per-deployment mapping.
+- cortexdb bridge for the self-serve snapshots (cross-platform analytics).
 - `connectors/storepulse-link.ts` is superseded by DB-backed `tenant_connectors`
   and remains dead; fold its "which connectors serve this tenant" intent into
   `getTenantStoreSummary` if StorePulse needs it, rather than reviving the
