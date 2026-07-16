@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import { CONCIERGE_SEED, SUGGESTIONS, type ChatMsg } from './shellData';
+import { branding } from './branding';
 
 // Same transport contract as the existing ArosChat: the router is reached at
 // ${ROUTER_URL}/v1/chat (proxied server-side when unset), body { agentId,
@@ -11,13 +12,17 @@ const ROUTER_URL = (import.meta as any).env?.VITE_ROUTER_URL || '';
  * reply; falls back to a friendly error bubble on failure (e.g. no router in
  * the preview). Optimistic user bubble + typing indicator.
  */
-export function ConciergeChat({ onConnect }: { onConnect?: () => void }) {
+export function ConciergeChat({ onConnect, seed, focusOnMount }: { onConnect?: () => void; seed?: string; focusOnMount?: boolean }) {
+  const mark = branding().concierge.charAt(0).toUpperCase();
   const [messages, setMessages] = useState<ChatMsg[]>(CONCIERGE_SEED);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, sending]);
+  useEffect(() => { if (seed) { setDraft(seed); inputRef.current?.focus({ preventScroll: true }); } }, [seed]);
+  useEffect(() => { if (focusOnMount) inputRef.current?.focus({ preventScroll: true }); }, [focusOnMount]);
 
   async function send(text: string) {
     const q = text.trim();
@@ -47,7 +52,7 @@ export function ConciergeChat({ onConnect }: { onConnect?: () => void }) {
       <div className="aros-thread">
         {messages.map((m, i) => (
           <div key={i} className={`aros-msg ${m.from === 'me' ? 'aros-msg--me' : ''}`}>
-            <div className="aros-msg__av">{m.from === 'me' ? 'DR' : 'S'}</div>
+            <div className="aros-msg__av">{m.from === 'me' ? 'DR' : mark}</div>
             <div>
               <div className="aros-msg__bubble">{m.text}</div>
               {m.meta && <div className="aros-msg__meta">{m.meta}</div>}
@@ -56,7 +61,7 @@ export function ConciergeChat({ onConnect }: { onConnect?: () => void }) {
         ))}
         {sending && (
           <div className="aros-msg">
-            <div className="aros-msg__av">S</div>
+            <div className="aros-msg__av">{mark}</div>
             <div className="aros-msg__bubble aros-msg__typing"><span /><span /><span /></div>
           </div>
         )}
@@ -70,10 +75,11 @@ export function ConciergeChat({ onConnect }: { onConnect?: () => void }) {
         </div>
         <form className="aros-inputrow" onSubmit={(e: FormEvent) => { e.preventDefault(); send(draft); }}>
           <input
+            ref={inputRef}
             value={draft}
             onChange={e => setDraft(e.target.value)}
-            placeholder='Message Shre… try “How were sales yesterday?”'
-            aria-label="Message Shre"
+            placeholder={`Message ${branding().concierge}… try “How were sales yesterday?”`}
+            aria-label={`Message ${branding().concierge}`}
             disabled={sending}
           />
           <button className="aros-send" type="submit" aria-label="Send" disabled={sending || !draft.trim()}>↑</button>
