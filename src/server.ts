@@ -41,7 +41,7 @@ import {
 } from './human-state.js';
 import { createTask } from '../tasks/store.js';
 import type { TaskPriority } from '../tasks/types.js';
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import { DEFAULT_MODEL } from './model-defaults.js';
 import { testConnection as testRapidRmsConnector } from '../connectors/rapidrms-api.js';
 import { testConnection as testAzureDbConnector } from '../connectors/azure-db.js';
@@ -177,7 +177,11 @@ async function sendStaticFile(res: ServerResponse, filePath: string): Promise<bo
     if (!fileStat.isFile()) return false;
     const ext = extname(filePath);
     const headers: Record<string, string> = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // Fingerprinted assets are safe to cache forever; the HTML shell (and the
+    // index.html SPA fallback) must never be stored by a shared cache/CDN, since
+    // it bootstraps an authenticated session.
     if (filePath.includes('/assets/')) headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+    else headers['Cache-Control'] = 'private, no-store';
     res.writeHead(200, headers);
     res.end(await readFile(filePath));
     return true;
@@ -2141,6 +2145,80 @@ async function handleConnectorsCreate(req: IncomingMessage, res: ServerResponse)
   }
 }
 
+type DiscoveredProviderStore = {
+  providerStoreId: string;
+  providerDbName?: string;
+  name?: string;
+};
+
+/**
+ * Materialize provider identities as canonical AROS stores and bind them to
+ * the connector. This is the hand-off point shared by AROS, MIB, StorePulse,
+ * HQ, and CPG: downstream products use tenant_id + store_id, never a provider
+ * client id as their authorization boundary.
+ */
+async function provisionCanonicalStores(input: {
+  tenantId: string;
+  connectorId: string;
+  connectorType: StoreConnectorType;
+  connectorName: string;
+  config: Record<string, any>;
+  discoveredStores?: DiscoveredProviderStore[];
+}): Promise<Array<{ storeId: string; providerStoreId: string }>> {
+  const supabase = createSupabaseAdmin();
+  let discovered = input.discoveredStores ?? [];
+
+  if (!discovered.length && input.connectorType === 'azure-db') {
+    discovered = [{
+      providerStoreId: String(input.config.database || input.connectorId),
+      providerDbName: String(input.config.database || ''),
+      name: input.connectorName,
+    }];
+  }
+  if (!discovered.length && input.connectorType === 'verifone-commander') {
+    discovered = [{
+      providerStoreId: String(input.config.storeNumber || input.connectorId),
+      name: String(input.config.storeName || input.connectorName),
+    }];
+  }
+
+  const provisioned: Array<{ storeId: string; providerStoreId: string }> = [];
+  for (const providerStore of discovered) {
+    const slugPart = providerStore.providerStoreId
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42)
+      || input.connectorId.slice(0, 8);
+    const slug = `${input.connectorType}-${slugPart}`;
+    const { data: store, error: storeError } = await supabase.from('stores').upsert({
+      tenant_id: input.tenantId,
+      name: providerStore.name?.trim() || input.connectorName,
+      slug,
+      pos_provider: input.connectorType,
+      pos_client_id: providerStore.providerStoreId,
+      pos_db_name: providerStore.providerDbName || null,
+      pos_external_id: providerStore.providerStoreId,
+      status: 'active',
+      metadata: { tenantConnectorId: input.connectorId },
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'tenant_id,slug' }).select('id').single();
+    if (storeError || !store) throw new Error(`Canonical store provisioning failed: ${storeError?.message || 'missing store'}`);
+
+    const { error: bindingError } = await supabase.from('store_connector_bindings').upsert({
+      tenant_id: input.tenantId,
+      store_id: store.id,
+      connector_id: input.connectorId,
+      provider: input.connectorType,
+      provider_store_id: providerStore.providerStoreId,
+      provider_db_name: providerStore.providerDbName || null,
+      status: 'syncing',
+      metadata: {},
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'tenant_id,connector_id,provider_store_id' });
+    if (bindingError) throw new Error(`Store binding failed: ${bindingError.message}`);
+    provisioned.push({ storeId: store.id, providerStoreId: providerStore.providerStoreId });
+  }
+  return provisioned;
+}
+
 async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = await authenticateRequest(req);
   if (!auth) return json(res, 401, { error: 'Authentication required' });
@@ -2220,12 +2298,22 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
     const provisioning = result.success
       ? await applyProvisioning({ tenantId: auth.tenantId, sourceKind: 'connector', sourceId: row.id, sourceKey: row.type, activate: true, actor: auth.userId })
       : { applied: false };
+    const canonicalStores = result.success
+      ? await provisionCanonicalStores({
+          tenantId: auth.tenantId,
+          connectorId: row.id,
+          connectorType: row.type as StoreConnectorType,
+          connectorName: row.name,
+          config,
+          discoveredStores: result.discoveredStores,
+        })
+      : [];
 
     // A newly-connected (or newly-broken) connector should reflect on the
     // dashboard immediately, not after the summary TTL expires.
     storeSummaryCache.delete(auth.tenantId);
 
-    json(res, 200, { ok: true, result, provisioning });
+    json(res, 200, { ok: true, result, provisioning, canonicalStores });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Connection test failed';
     console.error('[connectors.test]', message);
@@ -2234,6 +2322,78 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
     // Never leave test credentials in the in-memory vault.
     await Promise.all(refs.map((ref) => deleteCredential(ref).catch(() => {})));
   }
+}
+
+const APP_LAUNCH_URLS: Record<string, string> = {
+  storepulse: process.env.STOREPULSE_URL || 'https://storepulse.aros.live',
+  'storepulse-hq': process.env.STOREPULSE_HQ_URL || 'https://storepulse-hq.aros.live',
+  cpg: process.env.CPG_URL || 'https://cpg.aros.live',
+  mib: process.env.MIB_URL || 'https://mib.aros.live',
+};
+
+function base64UrlJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+/** Mint a five-minute, audience-bound launch token for an authorized product. */
+async function handleAppLaunch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await parseJsonBody(req);
+  let auth = await authenticateRequest(req);
+  const presentedToken = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const serviceSource = String(req.headers['x-service-source'] || '');
+  if (!auth && serviceSource === 'mib007' && tokensMatch(presentedToken, readServiceToken())) {
+    const tenantId = typeof body?.tenantId === 'string' ? body.tenantId : '';
+    const userId = typeof body?.userId === 'string' ? body.userId : '';
+    if (!UUID_RE.test(tenantId) || !userId) return json(res, 400, { error: 'Valid tenantId and userId required' });
+    auth = { tenantId, userId, role: typeof body?.role === 'string' ? body.role : 'member' };
+  }
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const app = body && typeof body.app === 'string' ? body.app : '';
+  if (!APP_LAUNCH_URLS[app]) return json(res, 400, { error: 'Unsupported app' });
+
+  const signingSecret = process.env.AROS_LAUNCH_TOKEN_SECRET || process.env.AROS_ENCRYPTION_KEY;
+  if (!signingSecret) return json(res, 503, { error: 'App launch signing is not configured' });
+
+  const supabase = createSupabaseAdmin();
+  const { data: stores, error } = await supabase
+    .from('stores').select('id').eq('tenant_id', auth.tenantId).eq('status', 'active');
+  if (error) return json(res, 500, { error: 'Unable to resolve authorized stores' });
+  const allowed = new Set((stores ?? []).map((store) => String(store.id)));
+  const requested = Array.isArray(body?.storeIds) ? body.storeIds.map(String) : [];
+  if (requested.some((storeId) => !allowed.has(storeId))) {
+    return json(res, 403, { error: 'Requested store is outside this tenant' });
+  }
+  const storeIds = requested.length ? requested : [...allowed];
+  const { data: bindings, error: bindingError } = await supabase
+    .from('store_connector_bindings')
+    .select('store_id,provider,provider_store_id,provider_db_name,status')
+    .eq('tenant_id', auth.tenantId)
+    .in('store_id', storeIds)
+    .in('status', ['syncing', 'ready']);
+  if (bindingError) return json(res, 500, { error: 'Unable to resolve store bindings' });
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64UrlJson({ alg: 'HS256', typ: 'JWT' });
+  const payload = base64UrlJson({
+    iss: 'aros', aud: app, sub: auth.userId, tenant_id: auth.tenantId,
+    store_ids: storeIds,
+    store_bindings: (bindings ?? []).map((binding) => ({
+      store_id: binding.store_id,
+      provider: binding.provider,
+      provider_store_id: binding.provider_store_id,
+      provider_db_name: binding.provider_db_name,
+    })),
+    role: auth.role, iat: now, exp: now + 300,
+    jti: randomBytes(16).toString('hex'),
+  });
+  const signature = createHmac('sha256', signingSecret).update(`${header}.${payload}`).digest('base64url');
+  const token = `${header}.${payload}.${signature}`;
+  const launchUrl = `${APP_LAUNCH_URLS[app].replace(/\/$/, '')}/#launch_token=${encodeURIComponent(token)}`;
+
+  await auditLog({
+    tenantId: auth.tenantId, userId: auth.userId, action: 'app.launched', resource: app,
+    detail: { storeIds, source: serviceSource || 'user' }, ip: getClientIp(req),
+  });
+  json(res, 200, { app, launchUrl, expiresAt: new Date((now + 300) * 1000).toISOString() });
 }
 
 async function handleModelRouting(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2763,6 +2923,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   const workspaceRolesMatch = pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)\/roles$/);
   if (workspaceRolesMatch && method === 'GET') return handleWorkspaceMembersCompat(req, res, workspaceRolesMatch[1]);
   if (pathname === '/api/apps' && method === 'GET') return handlePlatformApps(req, res);
+  if (pathname === '/api/apps/launch' && method === 'POST') return handleAppLaunch(req, res);
   const appGrantMatch = pathname.match(/^\/api\/apps\/([a-z0-9-]+)\/grant$/);
   if (appGrantMatch && method === 'POST') return handlePlatformApps(req, res, appGrantMatch[1]);
 
