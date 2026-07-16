@@ -31,6 +31,14 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
+if [ "$AUTH_MODE" = "central" ]; then
+  # The identity-only host must not inherit or bake legacy Supabase config
+  # from a developer or production platform .env file.
+  VITE_SUPABASE_URL=""
+  VITE_SUPABASE_ANON_KEY=""
+  SUPABASE_URL=""
+  SUPABASE_ANON_KEY=""
+fi
 export VITE_SUPABASE_URL="${VITE_SUPABASE_URL:-${SUPABASE_URL:-}}"
 export VITE_SUPABASE_ANON_KEY="${VITE_SUPABASE_ANON_KEY:-${SUPABASE_ANON_KEY:-}}"
 export VITE_AUTH_MODE="$AUTH_MODE"
