@@ -2150,6 +2150,26 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
   }
 }
 
+async function handleConnectorsUpdate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+  const body = await parseJsonBody(req);
+  const id = body && typeof body.id === 'string' ? body.id : '';
+  const name = body && typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
+  const description = body && typeof body.description === 'string' ? body.description.trim().slice(0, 500) : '';
+  const accessMode = body?.accessMode === 'read_write' ? 'read_write' : 'read';
+  if (!id || !name) return json(res, 400, { error: 'Connector id and title are required' });
+  const supabase = createSupabaseAdmin();
+  const { data: current } = await supabase.from('tenant_connectors').select('config').eq('tenant_id', auth.tenantId).eq('id', id).single();
+  if (!current) return json(res, 404, { error: 'Connector not found' });
+  const config = { ...(isRecord(current.config) ? current.config : {}), description, accessMode };
+  const { data, error } = await supabase.from('tenant_connectors').update({ name, config, updated_at: new Date().toISOString() }).eq('tenant_id', auth.tenantId).eq('id', id).select(CONNECTOR_COLUMNS).single();
+  if (error) return json(res, 500, { error: error.message });
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'connector.updated', resource: id, detail: { accessMode }, ip: getClientIp(req) });
+  json(res, 200, { connector: data });
+}
+
 async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = await authenticateRequest(req);
   if (!auth) return json(res, 401, { error: 'Authentication required' });
@@ -2575,6 +2595,10 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (pathname === '/api/connectors/test' && method === 'POST') {
     return handleConnectorsTest(req, res);
+  }
+
+  if (pathname === '/api/connectors' && method === 'PATCH') {
+    return handleConnectorsUpdate(req, res);
   }
 
   if (pathname === '/api/connectors' && method === 'DELETE') {

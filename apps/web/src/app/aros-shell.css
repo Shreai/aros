@@ -299,6 +299,10 @@
 .rsx-modal__body { padding: 18px 22px; overflow-y: auto; }
 .rsx-modal__h { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
 .rsx-modal__p { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; margin: 0 0 16px; }
+.rsx-secret { position: relative; display: block; }
+.rsx-secret .rsx-form__input { padding-right: 58px; }
+.rsx-secret__toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--ink-2); font: 600 12px inherit; cursor: pointer; padding: 6px; }
+.rsx-secret__toggle:hover, .rsx-secret__toggle:focus-visible { color: var(--ink); }
 
 .rsx-prov { display: flex; flex-direction: column; gap: 10px; }
 .rsx-prov__card {

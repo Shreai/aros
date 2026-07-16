@@ -79,6 +79,7 @@ export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [storesVersion, setStoresVersion] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
   const [seed, setSeed] = useState('');
@@ -134,7 +135,7 @@ export function AppShell() {
   const title = mode === 'chat' ? 'Concierge' : mode === 'home' ? 'Home' : SECTION_TITLES[section];
   const renderSection = () => {
     if (demo) return <SectionPanel section={section} onConnect={openWizard} />;
-    if (section === 'stores') return <StoresPage onConnect={openWizard} />;
+    if (section === 'stores') return <StoresPage key={storesVersion} onConnect={openWizard} />;
     if (section === 'apps') return <AppsPage />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
@@ -262,7 +263,7 @@ export function AppShell() {
       )}
 
       {wizardOpen && (
-        <ConnectWizard onClose={() => setWizardOpen(false)} onDone={name => { setWizardOpen(false); setToast(`${name} connected — discovering stores…`); }} />
+        <ConnectWizard onClose={() => setWizardOpen(false)} onDone={name => { setWizardOpen(false); setStoresVersion(v => v + 1); setToast(`${name} connected successfully.`); }} />
       )}
       {toast && <div className="rsx-toast">✓ {toast}</div>}
     </div>

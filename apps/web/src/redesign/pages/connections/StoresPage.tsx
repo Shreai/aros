@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useAuth } from '../../../contexts/AuthContext';
-import { createStore, listStores, removeStore, testStore, type StoreConnector, type StoreConnectorType } from './api';
+import { createStore, listStores, removeStore, testStore, updateStore, type StoreConnector, type StoreConnectorType } from './api';
 
 const PROVIDERS: Record<StoreConnectorType, { name: string; description: string; fields: Array<{ key: string; label: string; secret?: boolean; optional?: boolean }> }> = {
   'rapidrms-api': { name: 'RapidRMS', description: 'Sales, inventory, pricing, and promotions.', fields: [{ key: 'clientId', label: 'Client ID' }, { key: 'email', label: 'Account email', secret: true }, { key: 'password', label: 'Password', secret: true }] },
@@ -20,6 +20,10 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState('');
+  const [editing, setEditing] = useState<StoreConnector | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editAccess, setEditAccess] = useState<'read' | 'read_write'>('read');
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -54,6 +58,16 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
     finally { setBusy(''); }
   }
 
+  function manage(store: StoreConnector) {
+    setEditing(store); setEditName(store.name); setEditDescription(String(store.config?.description || ''));
+    setEditAccess(store.config?.accessMode === 'read_write' ? 'read_write' : 'read');
+  }
+  async function saveEdit(event: FormEvent) {
+    event.preventDefault(); if (!editing) return; setBusy(`edit:${editing.id}`); setError('');
+    try { await updateStore(auth, editing.id, { name: editName.trim(), description: editDescription.trim(), accessMode: editAccess }); setEditing(null); await load(); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Update failed'); } finally { setBusy(''); }
+  }
+
   const healthy = stores.filter(store => store.status === 'connected').length;
   const startConnect = () => onConnect ? onConnect() : setDialog(true);
   return <div className="rsx-panel">
@@ -61,12 +75,13 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
     {error && <div className="rsx-note" role="alert"><div className="rsx-note__title">Connection issue</div><div className="rsx-note__body">{error}</div><button className="rsx-row__btn" onClick={() => void load()}>Retry</button></div>}
     {loading ? <div className="rsx2-empty"><div className="rsx2-empty__text">Loading stores…</div></div> : stores.length === 0 ? <div className="rsx2-empty"><div className="rsx2-empty__icon">◇</div><div className="rsx2-empty__title">No stores connected</div><div className="rsx2-empty__text">Connect RapidRMS or Verifone Commander to begin using live store data.</div><button className="rsx-panel__cta" onClick={startConnect}>Connect your POS</button></div> : <>
       <div className="rsx-stats"><div className="rsx-stat"><strong>{healthy}</strong><span>Healthy</span></div><div className="rsx-stat"><strong>{stores.length}</strong><span>Total connections</span></div><div className="rsx-stat"><strong>{stores.length - healthy}</strong><span>Needs attention</span></div></div>
-      <div className="rsx-rows">{stores.map(store => <div className="rsx-row" key={store.id}><div className="rsx-row__mark">{PROVIDERS[store.type]?.name.slice(0, 2).toUpperCase() || 'ST'}</div><div className="rsx-row__info"><div className="rsx-row__title">{store.name}</div><div className="rsx-row__sub">{PROVIDERS[store.type]?.name || store.type}{store.last_error ? ` · ${store.last_error}` : store.last_tested ? ` · Tested ${new Date(store.last_tested).toLocaleString()}` : ''}</div></div><span className={`rsx-pill rsx-pill--${store.status === 'connected' ? 'on' : store.status === 'error' ? 'off' : 'warn'}`}>{store.status === 'connected' ? 'Connected' : store.status === 'error' ? 'Error' : 'Pending'}</span><button className="rsx-row__btn" disabled={Boolean(busy)} onClick={() => void action('test', store.id)}>{busy === `test:${store.id}` ? 'Testing…' : 'Test'}</button><button className="rsx-row__btn" disabled={Boolean(busy)} onClick={() => void action('remove', store.id)}>{busy === `remove:${store.id}` ? 'Removing…' : 'Remove'}</button></div>)}</div>
+      <div className="rsx-rows">{stores.map(store => <div className="rsx-row" key={store.id}><div className="rsx-row__mark">{PROVIDERS[store.type]?.name.slice(0, 2).toUpperCase() || 'ST'}</div><div className="rsx-row__info"><div className="rsx-row__title">{store.name}</div><div className="rsx-row__sub">{PROVIDERS[store.type]?.name || store.type} · {store.config?.accessMode === 'read_write' ? 'Read + write' : 'Read only'}{store.last_error ? ` · ${store.last_error}` : store.last_tested ? ` · Tested ${new Date(store.last_tested).toLocaleString()}` : ''}</div></div><span className={`rsx-pill rsx-pill--${store.status === 'connected' ? 'on' : store.status === 'error' ? 'off' : 'warn'}`}>{store.status === 'connected' ? 'Connected' : store.status === 'error' ? 'Error' : 'Pending'}</span><button className="rsx-row__btn" disabled={Boolean(busy)} onClick={() => manage(store)}>Manage</button><button className="rsx-row__btn" disabled={Boolean(busy)} onClick={() => void action('test', store.id)}>{busy === `test:${store.id}` ? 'Testing…' : 'Test'}</button><button className="rsx-row__btn" disabled={Boolean(busy)} onClick={() => void action('remove', store.id)}>{busy === `remove:${store.id}` ? 'Removing…' : 'Remove'}</button></div>)}</div>
     </>}
     {dialog && <div className="setup-modal-backdrop" onMouseDown={e => { if (e.currentTarget === e.target) setDialog(false); }}><form className="setup-modal" role="dialog" aria-modal="true" aria-label="Connect a store" onSubmit={submit}><div className="modal-title"><div><p className="setup-eyebrow">Secure connection</p><h2>Connect a store</h2></div><button className="modal-close" type="button" onClick={() => setDialog(false)} aria-label="Close">×</button></div><div className="provider-grid">{(Object.entries(PROVIDERS) as [StoreConnectorType, typeof PROVIDERS[StoreConnectorType]][]).map(([id, item]) => <button type="button" key={id} aria-pressed={provider === id} onClick={() => { setProvider(id); setValues({}); setVisibleSecrets({}); }}><span className="provider-mark">{item.name.slice(0, 2).toUpperCase()}</span><strong>{item.name}</strong><small>{item.description}</small></button>)}</div><div className="connection-form"><label>Connection name<input value={name} onChange={e => setName(e.target.value)} placeholder={`${PROVIDERS[provider].name} — Main store`} /></label>{PROVIDERS[provider].fields.map(field => {
       const isPassword = field.secret && field.key !== 'email';
       const inputId = `store-${provider}-${field.key}`;
       return <label key={field.key} htmlFor={inputId}>{field.label}{field.optional ? ' (optional)' : ''}<span style={{ display: 'flex', gap: 8 }}><input id={inputId} style={{ flex: 1 }} type={isPassword && !visibleSecrets[field.key] ? 'password' : field.key === 'email' ? 'email' : 'text'} value={values[field.key] || ''} autoComplete={field.key === 'email' ? 'username' : isPassword ? 'current-password' : 'off'} onChange={e => setValues(current => ({ ...current, [field.key]: e.target.value }))} />{isPassword && <button className="setup-secondary" type="button" aria-label={`${visibleSecrets[field.key] ? 'Hide' : 'Show'} ${field.label}`} aria-pressed={Boolean(visibleSecrets[field.key])} onClick={() => setVisibleSecrets(current => ({ ...current, [field.key]: !current[field.key] }))}>{visibleSecrets[field.key] ? 'Hide' : 'Show'}</button>}</span></label>;
     })}<p className="modal-copy">Credentials are encrypted server-side and are never returned to this browser.</p><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setDialog(false)}>Cancel</button><button className="setup-primary" disabled={busy === 'create'}>{busy === 'create' ? 'Saving and testing…' : 'Save & test'}</button></div></div></form></div>}
+    {editing && <div className="setup-modal-backdrop" onMouseDown={e => { if (e.currentTarget === e.target) setEditing(null); }}><form className="setup-modal" role="dialog" aria-modal="true" aria-label="Manage connection" onSubmit={saveEdit}><div className="modal-title"><div><p className="setup-eyebrow">Connection settings</p><h2>Manage connection</h2></div><button className="modal-close" type="button" onClick={() => setEditing(null)} aria-label="Close">×</button></div><div className="connection-form"><label>Title<input value={editName} onChange={e => setEditName(e.target.value)} required /></label><label>Details<input value={editDescription} onChange={e => setEditDescription(e.target.value)} placeholder="Optional store or connection note" /></label><label>Access mode<select value={editAccess} onChange={e => setEditAccess(e.target.value as 'read' | 'read_write')}><option value="read">Read only</option><option value="read_write">Read + approval-gated writes</option></select></label><p className="modal-copy">Write mode never bypasses approval gates.</p><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setEditing(null)}>Cancel</button><button className="setup-primary" disabled={busy === `edit:${editing.id}`}>{busy === `edit:${editing.id}` ? 'Saving…' : 'Save changes'}</button></div></div></form></div>}
   </div>;
 }

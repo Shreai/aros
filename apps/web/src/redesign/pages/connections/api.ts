@@ -5,6 +5,7 @@ export type StoreConnector = {
   id: string;
   type: StoreConnectorType;
   name: string;
+  config?: { description?: string; accessMode?: 'read' | 'read_write'; [key: string]: unknown };
   status: 'pending' | 'connected' | 'disconnected' | 'error';
   last_tested?: string | null;
   last_error?: string | null;
@@ -62,6 +63,11 @@ export async function testStore(auth: AuthScope, id: string): Promise<boolean> {
   return Boolean(result.result?.success);
 }
 
+export async function updateStore(auth: AuthScope, id: string, input: { name: string; description: string; accessMode: 'read' | 'read_write' }): Promise<StoreConnector> {
+  const result = await request<{ connector: StoreConnector }>('/api/connectors', auth, { method: 'PATCH', body: JSON.stringify({ id, ...input }) });
+  return result.connector;
+}
+
 export async function removeStore(auth: AuthScope, id: string): Promise<void> {
   await request(`/api/connectors?id=${encodeURIComponent(id)}`, auth, { method: 'DELETE' });
 }
@@ -80,4 +86,3 @@ export async function grantApp(auth: AuthScope, app: PlatformApp): Promise<void>
 export async function disableApp(auth: AuthScope, appId: string): Promise<void> {
   await request(`/api/marketplace/apps/${encodeURIComponent(appId)}/disable`, auth, { method: 'POST' });
 }
-

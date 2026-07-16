@@ -18,6 +18,7 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
   const [providerId, setProviderId] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
+  const [accessMode, setAccessMode] = useState<'read' | 'read_write'>('read');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const provider = POS_PROVIDERS.find(p => p.id === providerId) || null;
@@ -39,7 +40,7 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
     setBusy(true); setError('');
     try {
       const targetStore = provider.id === 'rapidrms' ? String(values.clientId || '') : String(values.commanderIp || '');
-      const config: Record<string, unknown> = { stores: targetStore ? [targetStore] : [] };
+      const config: Record<string, unknown> = { stores: targetStore ? [targetStore] : [], accessMode };
       const secrets: Record<string, string> = {};
       for (const f of provider.fields) {
         const v = (values[f.key] || '').trim();
@@ -118,7 +119,7 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
                 {provider.fields.map(f => (
                   <label key={f.key} className="rsx-form__field">
                     <span className="rsx-form__label">{f.label}</span>
-                    <input
+                    <span className="rsx-secret"><input
                       className="rsx-form__input"
                       type={f.secret && !visibleSecrets[f.key] ? 'password' : f.key === 'email' ? 'email' : 'text'}
                       autoComplete={f.key === 'email' ? 'username' : f.secret ? 'current-password' : 'off'}
@@ -126,7 +127,7 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
                       value={values[f.key] || ''}
                       onChange={e => setValues(v => ({ ...v, [f.key]: e.target.value }))}
                     />
-                    {f.secret && <button className="rsx-modal__back" type="button" aria-label={`${visibleSecrets[f.key] ? 'Hide' : 'Show'} ${f.label}`} aria-pressed={Boolean(visibleSecrets[f.key])} onClick={() => setVisibleSecrets(current => ({ ...current, [f.key]: !current[f.key] }))}>{visibleSecrets[f.key] ? 'Hide' : 'Show'}</button>}
+                    {f.secret && <button className="rsx-secret__toggle" type="button" aria-label={`${visibleSecrets[f.key] ? 'Hide' : 'Show'} ${f.label}`} aria-pressed={Boolean(visibleSecrets[f.key])} onClick={() => setVisibleSecrets(current => ({ ...current, [f.key]: !current[f.key] }))}>{visibleSecrets[f.key] ? 'Hide' : 'Show'}</button>}</span>
                   </label>
                 ))}
               </div>
@@ -139,6 +140,8 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
               <p className="rsx-modal__p">{provider?.id === 'rapidrms' ? 'A RapidRMS client ID identifies one specific store. We will validate it and add that store. Repeat this flow with another client ID to add another store.' : 'We will validate this Commander and add its site. You can connect another site afterward.'}</p>
               <div className="rsx-scope">
                 <div className="rsx-scope__row"><strong>{provider?.id === 'rapidrms' ? 'RapidRMS store' : 'Verifone site'}</strong><span>{provider?.id === 'rapidrms' ? `Client ID: ${values.clientId}` : `Commander: ${values.commanderIp}`}</span></div>
+                <label className="rsx-scope__row"><input type="radio" name="access" checked={accessMode === 'read'} onChange={() => setAccessMode('read')} /><span><strong>Read only</strong><br />Sales, inventory, transactions, and reporting.</span></label>
+                <label className="rsx-scope__row"><input type="radio" name="access" checked={accessMode === 'read_write'} onChange={() => setAccessMode('read_write')} /><span><strong>Read + write</strong><br />Proposed changes remain approval-gated.</span></label>
               </div>
               <div className="rsx-note" style={{ marginTop: 16 }}>
                 <div className="rsx-note__body" style={{ opacity: 1 }}>
@@ -157,7 +160,7 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
                 <ReviewRow label="Provider" value={provider.name} />
                 <ReviewRow label="Connection" value={provider.kind === 'tunnel' ? 'Secure tunnel to site controller' : 'HTTPS API'} />
                 <ReviewRow label="Store target" value={provider.id === 'rapidrms' ? `Client ID ${values.clientId}` : String(values.commanderIp || '')} />
-                <ReviewRow label="Access" value="Read + approval-gated writes" />
+                <ReviewRow label="Access" value={accessMode === 'read' ? 'Read only' : 'Read + approval-gated writes'} />
               </div>
               {error && <div className="aros-auth__error" style={{ marginTop: 14 }}>{error}</div>}
             </>

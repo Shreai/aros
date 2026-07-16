@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import { CONCIERGE_SEED, SUGGESTIONS, type ChatMsg } from './shellData';
-import { useDemo } from './data';
+import { useConnectionSummary, useDemo } from './data';
+import { useAuth } from '../contexts/AuthContext';
 import { branding } from './branding';
 import { ChatMessageRenderer, type ChatPalette } from '../aros-ai/ChatMessageRenderer';
 import { itemsFromMessages, type CanvasWidgetItem } from '../aros-ai/canvas';
@@ -25,6 +26,8 @@ const ROUTER_URL = (import.meta as any).env?.VITE_ROUTER_URL || '';
  */
 export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, initial, onCanvasItems }: { onConnect?: () => void; onConnectApps?: () => void; seed?: string; focusOnMount?: boolean; initial?: ChatMsg[]; onCanvasItems?: (items: CanvasWidgetItem[]) => void }) {
   const demo = useDemo();
+  const { session, tenant } = useAuth();
+  const connections = useConnectionSummary();
   const mark = branding().concierge.charAt(0).toUpperCase();
   const palette = warmPalette();
   const [messages, setMessages] = useState<ChatMsg[]>(initial && initial.length ? initial : demo ? CONCIERGE_SEED : []);
@@ -50,8 +53,8 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
     try {
       const res = await fetch(`${ROUTER_URL}/v1/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: 'aros-agent', messages: [{ role: 'user', content: q }], stream: false }),
+        headers: { 'Content-Type': 'application/json', ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}), ...(tenant?.id ? { 'x-aros-tenant-id': tenant.id } : {}) },
+        body: JSON.stringify({ agentId: 'aros-agent', tenantId: tenant?.id, workspaceId: tenant?.id, messages: [...messages.map(m => ({ role: m.from === 'me' ? 'user' : 'assistant', content: m.text })), { role: 'user', content: q }], stream: false }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -67,7 +70,7 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
   return (
     <div className="aros-chat">
       <div className="aros-thread">
-        {messages.length === 0 && !sending && <div className="rsx2-empty rsx2-empty--tall"><div className="rsx2-empty__title">Start a conversation</div><div className="rsx2-empty__text">Ask about your connected store data, or connect a store first.</div></div>}
+        {messages.length === 0 && !sending && <div className="rsx2-empty rsx2-empty--tall"><div className="rsx2-empty__title">Start a conversation</div><div className="rsx2-empty__text">{connections.total > 0 ? 'Ask about sales, inventory, operations, or any connected tool.' : 'Ask a general question, or connect a store to use live retail data.'}</div></div>}
         {messages.map((m, i) => (
           <div key={i} className={`aros-msg ${m.from === 'me' ? 'aros-msg--me' : ''}`}>
             <div className="aros-msg__av">{m.from === 'me' ? 'DR' : mark}</div>
@@ -90,8 +93,8 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
 
       <div className="aros-composer">
         <div className="aros-chips">
-          <button className="aros-chip" type="button" onClick={onConnect}><span className="aros-chip__dot" />Connect Store</button>
-          <button className="aros-chip" type="button" onClick={onConnectApps}><span className="aros-chip__dot" />Connect Apps</button>
+          {connections.total === 0 && <button className="aros-chip" type="button" onClick={onConnect}><span className="aros-chip__dot" />Connect Store</button>}
+          <button className="aros-chip" type="button" onClick={onConnectApps}><span className="aros-chip__dot" />Marketplace</button>
         </div>
         <form className="aros-inputrow" onSubmit={(e: FormEvent) => { e.preventDefault(); send(draft); }}>
           <input
