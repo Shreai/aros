@@ -47,6 +47,15 @@ import { testConnection as testRapidRmsConnector } from '../connectors/rapidrms-
 import { testConnection as testAzureDbConnector } from '../connectors/azure-db.js';
 import { testConnection as testVerifoneConnector } from '../connectors/verifone/connector.js';
 import { setTenantSecret, storeCredential, deleteCredential } from '../connectors/vault-ref.js';
+import type { RapidRmsSession } from '../connectors/types.js';
+import {
+  buildEdiSession,
+  resolveEdiBaseUrl,
+  listEdiFiles,
+  uploadEdi,
+  getEdiItems,
+  revertEdi,
+} from '../connectors/rapidrms-edi.js';
 import { fetchStoreSalesRange, fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
 import { replicateSnapshotToCortex } from '../connectors/cortex-bridge.js';
 import { proxyToMib } from '../connectors/mib-documents.js';
@@ -644,6 +653,42 @@ async function handleVerifyOtp(req: IncomingMessage, res: ServerResponse): Promi
 
 // ── Onboarding ──────────────────────────────────────────────────
 
+type OnboardingComponentName = 'model' | 'store' | 'sync' | 'capabilities';
+type OnboardingComponentStatus = 'not_started' | 'pending' | 'ready' | 'error' | 'skipped';
+
+function canonicalOnboardingState(row: Record<string, unknown> | null, tenantId: string) {
+  const component = (name: OnboardingComponentName) => {
+    const value = row?.[name];
+    return value && typeof value === 'object' ? value : { status: 'not_started', updatedAt: null };
+  };
+  return {
+    version: Number(row?.version || 1), tenantId,
+    phase: String(row?.phase || 'identity_ready'),
+    model: component('model'), store: component('store'), sync: component('sync'), capabilities: component('capabilities'),
+    completedAt: row?.completed_at ?? null, updatedAt: row?.updated_at ?? new Date().toISOString(),
+  };
+}
+
+async function resolveOnboardingScope(req: IncomingMessage, tenantId: string, userId?: string) {
+  const userAuth = await authenticateRequest(req);
+  if (userAuth) return userAuth.tenantId === tenantId ? userAuth : null;
+  const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  if (String(req.headers['x-service-source'] || '') !== 'mib007' || !tokensMatch(token, readServiceToken())) return null;
+  return UUID_RE.test(tenantId) && userId ? { tenantId, userId, role: 'member' } : null;
+}
+
+async function setOnboardingComponent(
+  tenantId: string, component: OnboardingComponentName, status: OnboardingComponentStatus,
+  metadata: Record<string, unknown> = {}, error: string | null = null,
+) {
+  const { data, error: rpcError } = await createSupabaseAdmin().rpc('set_workspace_onboarding_component', {
+    p_tenant_id: tenantId, p_component: component, p_status: status, p_metadata: metadata, p_error: error,
+  });
+  if (rpcError) throw rpcError;
+  const row = Array.isArray(data) ? data[0] : data;
+  return canonicalOnboardingState((row as Record<string, unknown> | null) ?? null, tenantId);
+}
+
 async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const tenantId = url.searchParams.get('tenantId');
@@ -651,6 +696,9 @@ async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse)
   if (!tenantId) {
     return json(res, 400, { error: 'Missing query parameter: tenantId' });
   }
+
+  const scope = await resolveOnboardingScope(req, tenantId, url.searchParams.get('userId') || undefined);
+  if (!scope) return json(res, 401, { error: 'Authentication required' });
 
   try {
     const supabase = createSupabaseAdmin();
@@ -670,12 +718,19 @@ async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse)
       .eq('tenant_id', tenantId)
       .single();
 
+    const { data: canonical } = await supabase
+      .from('workspace_onboarding_state')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+
     json(res, 200, {
       tenantId: tenant.id,
       completed: tenant.onboarding_completed === true,
       step: progress?.step ?? 1,
       stepData: progress?.step_data ?? {},
       completedAt: progress?.completed_at ?? null,
+      state: canonicalOnboardingState(canonical as Record<string, unknown> | null, tenantId),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to fetch onboarding status';
@@ -764,6 +819,82 @@ async function handleOnboardingComplete(req: IncomingMessage, res: ServerRespons
     const message = err instanceof Error ? err.message : 'Failed to complete onboarding';
     console.error('[onboarding/complete]', message);
     json(res, 500, { error: message });
+  }
+}
+
+async function handleOnboardingProgress(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await parseJsonBody(req);
+  if (!body) return json(res, 400, { error: 'Invalid JSON' });
+
+  const { tenantId, step, stepData } = body as {
+    tenantId?: string;
+    step?: number;
+    stepData?: Record<string, unknown>;
+  };
+
+  if (!tenantId) return json(res, 400, { error: 'tenantId is required' });
+
+  try {
+    const supabase = createSupabaseAdmin();
+    const requestedUserId = typeof (body as Record<string, unknown>).userId === 'string'
+      ? String((body as Record<string, unknown>).userId) : undefined;
+    const scope = await resolveOnboardingScope(req, tenantId, requestedUserId);
+    if (!scope) return json(res, 401, { error: 'Authentication required' });
+
+    // Merge step_data and never regress the recorded step — progress only moves
+    // forward, so a stale/out-of-order write can't rewind a resumable journey.
+    const { data: existing } = await supabase
+      .from('onboarding_progress')
+      .select('step, step_data')
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+
+    const currentStep = typeof existing?.step === 'number' ? existing.step : 1;
+    const requestedStep = typeof step === 'number' && Number.isFinite(step) ? Math.floor(step) : currentStep;
+    const nextStep = Math.max(currentStep, requestedStep);
+    const mergedData = {
+      ...(existing?.step_data && typeof existing.step_data === 'object' ? existing.step_data : {}),
+      ...(stepData && typeof stepData === 'object' ? stepData : {}),
+    };
+
+    const { error: progressError } = await supabase
+      .from('onboarding_progress')
+      .upsert({ tenant_id: tenantId, step: nextStep, step_data: mergedData }, { onConflict: 'tenant_id' });
+
+    if (progressError) throw progressError;
+
+    let state = null;
+    if (stepData?.model && typeof stepData.model === 'object') {
+      state = await setOnboardingComponent(tenantId, 'model', 'ready', stepData.model as Record<string, unknown>);
+    }
+
+    json(res, 200, { ok: true, step: nextStep, stepData: mergedData, state });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save onboarding progress';
+    console.error('[onboarding/progress]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+async function handleOnboardingComponent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await parseJsonBody(req);
+  if (!body) return json(res, 400, { error: 'Invalid JSON' });
+  const tenantId = typeof body.tenantId === 'string' ? body.tenantId : '';
+  const userId = typeof body.userId === 'string' ? body.userId : undefined;
+  const component = body.component as OnboardingComponentName;
+  const status = body.status as OnboardingComponentStatus;
+  if (!UUID_RE.test(tenantId)) return json(res, 400, { error: 'Valid tenantId is required' });
+  if (!['model', 'store', 'sync', 'capabilities'].includes(component)) return json(res, 400, { error: 'Invalid component' });
+  if (!['not_started', 'pending', 'ready', 'error', 'skipped'].includes(status)) return json(res, 400, { error: 'Invalid status' });
+  const scope = await resolveOnboardingScope(req, tenantId, userId);
+  if (!scope) return json(res, 401, { error: 'Authentication required' });
+  try {
+    const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+      ? body.metadata as Record<string, unknown> : {};
+    const state = await setOnboardingComponent(tenantId, component, status, metadata, typeof body.error === 'string' ? body.error : null);
+    json(res, 200, { state });
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : 'Failed to update onboarding state' });
   }
 }
 
@@ -2455,6 +2586,14 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
       })
       .eq('id', row.id);
 
+    if (result.success) {
+      await setOnboardingComponent(auth.tenantId, 'store', 'ready', {
+        connectorId: row.id, connectorType: row.type,
+      });
+      await setOnboardingComponent(auth.tenantId, 'sync', 'pending', { connectorId: row.id });
+    } else {
+      await setOnboardingComponent(auth.tenantId, 'store', 'error', { connectorId: row.id }, result.error ?? 'Connection test failed');
+    }
     // A newly-connected (or newly-broken) connector should reflect on the
     // dashboard immediately, not after the summary TTL expires.
     storeSummaryCache.delete(auth.tenantId);
@@ -2504,6 +2643,154 @@ async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse)
     const message = err instanceof Error ? err.message : 'Failed to remove connector';
     console.error('[connectors.delete]', message);
     json(res, 500, { error: message });
+  }
+}
+
+// ── RapidRMS EDI (native invoice API — SAME login as the connector) ──────
+// EDI reuses the tenant's existing 'rapidrms-api' connector row: its clientId +
+// stored email/password. The end user never handles the RapidRMS token — the
+// server re-authenticates on their behalf (against the resolved EDI base URL,
+// staging by default) for each request and discards the derived vault refs
+// after. No new connector type is needed; no schema change.
+
+/** Whether per-request EDI base-URL overrides are honored (dev/non-prod only). */
+function ediOverrideAllowed(): boolean {
+  return process.env.NODE_ENV !== 'production';
+}
+
+/**
+ * Resolve the caller's tenant RapidRMS connector, build a short-lived EDI
+ * session against the resolved (staging-by-default) base URL, run `fn`, and
+ * always tear down the temporary credential refs. Throws a caller-friendly
+ * error when no RapidRMS connector is configured.
+ */
+async function withTenantEdiSession<T>(
+  tenantId: string,
+  apiUrlOverride: string | null,
+  fn: (session: RapidRmsSession, ediBaseUrl: string) => Promise<T>,
+): Promise<T> {
+  const supabase = createSupabaseAdmin();
+  const { data: rows } = await supabase
+    .from('tenant_connectors')
+    .select(`${CONNECTOR_COLUMNS}, credentials_encrypted`)
+    .eq('tenant_id', tenantId)
+    .eq('type', 'rapidrms-api')
+    .order('status', { ascending: true }) // 'connected' sorts before pending/error
+    .limit(5);
+  const row = (rows ?? []).find((r) => r.status === 'connected') ?? (rows ?? [])[0];
+  if (!row) throw new Error('No RapidRMS connection is configured for this workspace');
+
+  ensureConnectorCrypto();
+  const secrets = JSON.parse(decryptValue(row.credentials_encrypted)) as Record<string, string>;
+  const config = (row.config ?? {}) as Record<string, unknown>;
+  const clientId = String(config.clientId || '');
+  if (!clientId) throw new Error('RapidRMS connection is missing its Client ID');
+
+  setTenantSecret(vaultSecretFor(tenantId));
+  const emailRef = await storeCredential(`${row.id}:edi:email`, secrets.email ?? '');
+  const passwordRef = await storeCredential(`${row.id}:edi:password`, secrets.password ?? '');
+  try {
+    const ediBaseUrl = resolveEdiBaseUrl(apiUrlOverride, { allowOverride: ediOverrideAllowed() });
+    const session = await buildEdiSession({
+      clientId,
+      sessionTimeout: Number(config.sessionTimeout) || 420,
+      emailRef,
+      passwordRef,
+      ediBaseUrl,
+    });
+    return await fn(session, ediBaseUrl);
+  } finally {
+    await Promise.all([emailRef, passwordRef].map((ref) => deleteCredential(ref).catch(() => {})));
+  }
+}
+
+function ediErrorStatus(message: string): number {
+  return /no rapidrms connection|missing its client id/i.test(message) ? 409 : 502;
+}
+
+async function handleEdiList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const override = ediOverrideAllowed() ? getRequestUrl(req).searchParams.get('apiUrl') : null;
+  try {
+    const files = await withTenantEdiSession(auth.tenantId, override, (session) => listEdiFiles(session));
+    json(res, 200, { files });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to list EDI invoices';
+    console.error('[edi.list]', message);
+    json(res, ediErrorStatus(message), { error: message });
+  }
+}
+
+async function handleEdiUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+
+  const body = await parseJsonBody(req);
+  if (!body) return json(res, 400, { error: 'Invalid JSON' });
+  const ediUpload = body.EDIUpload;
+  const items = body.EDIReceiveItem;
+  if (!isRecord(ediUpload)) return json(res, 400, { error: 'Missing required field: EDIUpload' });
+  if (!Array.isArray(items)) return json(res, 400, { error: 'Missing required field: EDIReceiveItem (array)' });
+  const override = ediOverrideAllowed() && typeof body.apiUrl === 'string' ? body.apiUrl : null;
+
+  try {
+    const result = await withTenantEdiSession(auth.tenantId, override, (session) =>
+      uploadEdi(session, { EDIUpload: ediUpload as any, EDIReceiveItem: items as any }),
+    );
+    await auditLog({
+      tenantId: auth.tenantId, userId: auth.userId, action: 'edi.uploaded', resource: 'rapidrms-edi',
+      detail: { status: result.status, receiveId: result.data ?? null, items: items.length }, ip: getClientIp(req),
+    });
+    json(res, 200, { status: result.status, message: result.message, receiveId: result.data ?? null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to upload EDI invoice';
+    console.error('[edi.upload]', message);
+    json(res, ediErrorStatus(message), { error: message });
+  }
+}
+
+async function handleEdiItems(req: IncomingMessage, res: ServerResponse, receiveId: number): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const override = ediOverrideAllowed() ? getRequestUrl(req).searchParams.get('apiUrl') : null;
+  try {
+    const items = await withTenantEdiSession(auth.tenantId, override, (session) => getEdiItems(session, receiveId));
+    json(res, 200, { items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to load EDI invoice items';
+    console.error('[edi.items]', message);
+    json(res, ediErrorStatus(message), { error: message });
+  }
+}
+
+async function handleEdiRevert(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+
+  const body = await parseJsonBody(req);
+  if (!body) return json(res, 400, { error: 'Invalid JSON' });
+  const receiveId = Number(body.receiveId);
+  const branchId = Number(body.branchId);
+  if (!Number.isFinite(receiveId) || receiveId <= 0) return json(res, 400, { error: 'Valid receiveId is required' });
+  if (!Number.isFinite(branchId) || branchId <= 0) return json(res, 400, { error: 'Valid branchId is required' });
+  const override = ediOverrideAllowed() && typeof body.apiUrl === 'string' ? body.apiUrl : null;
+
+  try {
+    const result = await withTenantEdiSession(auth.tenantId, override, (session) =>
+      revertEdi(session, { receiveId, branchId }),
+    );
+    await auditLog({
+      tenantId: auth.tenantId, userId: auth.userId, action: 'edi.reverted', resource: 'rapidrms-edi',
+      detail: { status: result.status, receiveId, branchId }, ip: getClientIp(req),
+    });
+    json(res, 200, { status: result.status, message: result.message });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to revert EDI invoice';
+    console.error('[edi.revert]', message);
+    json(res, ediErrorStatus(message), { error: message });
   }
 }
 
@@ -3049,6 +3336,14 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return handleOnboardingComplete(req, res);
   }
 
+  if (url === '/api/onboarding/progress' && method === 'POST') {
+    return handleOnboardingProgress(req, res);
+  }
+
+  if (url === '/api/onboarding/component' && method === 'POST') {
+    return handleOnboardingComponent(req, res);
+  }
+
   // ── Dashboard (authenticated) ──────────────────────────
   if (url === '/api/dashboard' && method === 'GET') {
     return handleDashboard(req, res);
@@ -3116,6 +3411,21 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (pathname === '/api/connectors' && method === 'DELETE') {
     return handleConnectorsDelete(req, res);
+  }
+
+  // ── RapidRMS EDI invoices (reuses the tenant's rapidrms-api connector login) ──
+  if (pathname === '/api/rapidrms/edi' && method === 'GET') {
+    return handleEdiList(req, res);
+  }
+  if (pathname === '/api/rapidrms/edi' && method === 'POST') {
+    return handleEdiUpload(req, res);
+  }
+  if (pathname === '/api/rapidrms/edi/revert' && method === 'POST') {
+    return handleEdiRevert(req, res);
+  }
+  const ediItemsMatch = pathname.match(/^\/api\/rapidrms\/edi\/(\d+)$/);
+  if (ediItemsMatch && method === 'GET') {
+    return handleEdiItems(req, res, Number(ediItemsMatch[1]));
   }
 
   // Live store data read-back — consumed by the dashboard and by the agent's

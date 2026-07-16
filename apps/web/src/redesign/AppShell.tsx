@@ -8,6 +8,7 @@ import {
   BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage, DevicesPage,
 } from './pages/admin';
 import { DocumentsPage } from './pages/Documents';
+import { EdiInvoices } from './pages/EdiInvoices';
 import { ConnectWizard } from './ConnectWizard';
 import { Canvas } from './Canvas';
 import { Home } from './Home';
@@ -28,6 +29,7 @@ const PATH_TO_SECTION: Record<string, Exclude<SectionKey, 'chat'>> = {
   '/stores': 'stores', '/apps': 'apps', '/skills': 'skills', '/agents': 'agents',
   '/models': 'models', '/computers': 'devices', '/connection-health': 'health', '/settings': 'settings',
   '/permissions': 'permissions', '/documents': 'documents',
+  '/edi-invoices': 'edi-invoices',
   '/profile': 'settings', '/billing': 'billing', '/costs': 'usage', '/users': 'team',
   '/workspace': 'settings', '/marketplace': 'apps', '/channels': 'apps',
 };
@@ -35,6 +37,7 @@ const SECTION_TO_PATH: Partial<Record<SectionKey, string>> = {
   stores: '/stores', apps: '/apps', skills: '/skills', agents: '/agents',
   models: '/models', devices: '/computers', health: '/connection-health', settings: '/settings',
   billing: '/billing', usage: '/costs', team: '/users', permissions: '/permissions', documents: '/documents',
+  'edi-invoices': '/edi-invoices',
 };
 
 function routeState(path = window.location.pathname): { mode: 'home' | 'chat' | 'app'; section: Exclude<SectionKey, 'chat'> } {
@@ -145,6 +148,7 @@ export function AppShell() {
     if (section === 'billing') return <BillingPage />;
     if (section === 'usage') return <UsagePage />;
     if (section === 'settings') return <SettingsPage />;
+    if (section === 'edi-invoices') return <EdiInvoices />;
     if (section === 'skills' || section === 'agents' || section === 'models') {
       const kind = section === 'skills' ? 'skill' : section === 'agents' ? 'agent' : 'model';
       return <IntelligencePage kind={kind} />;
@@ -252,6 +256,8 @@ export function AppShell() {
             <div className="aros-role__pills">
               {demo ? ROLES.map(r => (<span key={r} className="aros-role__pill" aria-pressed={role === r}>{r}</span>)) : <span className="aros-role__pill" aria-pressed>{role}</span>}
             </div>
+            <div className="aros-side__section" style={{ marginLeft: 0 }}>Account</div>
+            <NavRow item={{ key: 'devices', label: 'Sessions & Devices', glyph: 'PC' }} active={mode === 'app' && section === 'devices'} onClick={() => goProfileSection('devices')} />
             <div className="aros-side__section" style={{ marginLeft: 0 }}>Workspace</div>
             {WORKSPACE_NAV.map(item => (
               <NavRow key={item.key} item={item} active={mode === 'app' && section === item.key} onClick={() => goProfileSection(item.key)} />
