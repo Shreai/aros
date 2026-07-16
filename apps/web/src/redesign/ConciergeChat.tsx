@@ -18,6 +18,11 @@ export function warmPalette(): ChatPalette {
 // ${ROUTER_URL}/v1/chat (proxied server-side when unset), body { agentId,
 // messages, stream }, reply in data.response|message|content.
 const ROUTER_URL = (import.meta as any).env?.VITE_ROUTER_URL || '';
+const API_BASE = (window as any).__AROS_API_URL__ || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
+const FLEET_GUIDANCE = `AROS specialist fleet: Ana handles inventory and reorders; Sammy handles revenue, margin, and P&L; Victor handles fraud and loss prevention; Larry handles labor and scheduling; Rita handles reviews and reputation; Store Operations handles connected-store sales and health. External web, news, and weather require a Research & External Intelligence agent with web.search and weather.read capabilities.`;
+const EXTERNAL_INTELLIGENCE_REQUEST = /\b(weather|forecast|temperature|news|headlines|search (?:the )?web|browse (?:the )?(?:web|internet)|look up online)\b/i;
+
+type ActiveAgent = { name: string; capabilities: string[] };
 
 /**
  * Concierge chat home. Sends to the real shre-router /v1/chat and renders the
@@ -32,6 +37,7 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
   const [messages, setMessages] = useState<ChatMsg[]>(initial && initial.length ? initial : demo ? CONCIERGE_SEED : []);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [activeAgents, setActiveAgents] = useState<ActiveAgent[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -42,12 +48,32 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
   }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (seed) { setDraft(seed); inputRef.current?.focus({ preventScroll: true }); } }, [seed]);
   useEffect(() => { if (focusOnMount) inputRef.current?.focus({ preventScroll: true }); }, [focusOnMount]);
+  useEffect(() => {
+    if (demo || !session?.access_token) return;
+    fetch(`${API_BASE}/api/resources/agent`, { headers: { Authorization: `Bearer ${session.access_token}`, ...(tenant?.id ? { 'x-aros-tenant-id': tenant.id } : {}) } })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => setActiveAgents((Array.isArray(data?.resources) ? data.resources : [])
+        .filter((item: any) => item?.status === 'active' && item?.name)
+        .map((item: any) => ({ name: String(item.name), capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : [] }))))
+      .catch(() => setActiveAgents([]));
+  }, [demo, session?.access_token, tenant?.id]);
 
   async function send(text: string) {
     const q = text.trim();
     if (!q || sending) return;
+    const nextMessages: ChatMsg[] = [...messages, { from: 'me', text: q }];
     setMessages(prev => [...prev, { from: 'me', text: q }]);
     setDraft('');
+    const hasExternalIntelligence = activeAgents.some(agent => agent.capabilities.some(capability => capability === 'weather.read' || capability === 'web.search'));
+    if (EXTERNAL_INTELLIGENCE_REQUEST.test(q) && !hasExternalIntelligence) {
+      const active = activeAgents.length ? activeAgents.map(agent => agent.name).join(', ') : 'no specialists reported';
+      setMessages(prev => [...prev, {
+        from: 'shre',
+        text: `That request needs the Research & External Intelligence agent (weather.read / web.search), and it is not active in this workspace. Active agents: ${active}. An owner or admin can open Agents to activate a published specialist, or Marketplace to add the required agent or fleet. If it is not listed in Marketplace, it has not been published for activation yet.`,
+        meta: 'AROS fleet routing',
+      }]);
+      return;
+    }
     setSending(true);
     try {
       const res = await fetch(`${ROUTER_URL}/v1/chat`, {
@@ -57,7 +83,14 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
           ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
           ...(tenant?.id ? { 'x-aros-tenant-id': tenant.id, 'X-Workspace-ID': tenant.id } : {}),
         },
-        body: JSON.stringify({ agentId: 'aros-agent', messages: [{ role: 'user', content: q }], stream: false }),
+        body: JSON.stringify({
+          agentId: 'aros-agent',
+          messages: [
+            { role: 'system', content: `You are the AROS fleet orchestrator. ${FLEET_GUIDANCE} Active agents for this workspace: ${activeAgents.length ? activeAgents.map(agent => agent.name).join(', ') : 'none reported'}. Never expose internal reasoning, tool names, tool errors, or access-control implementation details. If a request needs a capability that is not active, state which agent or capability is unavailable, briefly list the relevant active specialists and what they can do, then direct an owner/admin to Agents to activate an available specialist or Marketplace to add the required agent/fleet. If the required agent is not published, say so clearly. Do not claim an agent is installed when it is not.` },
+            ...nextMessages.map(message => ({ role: message.from === 'me' ? 'user' : 'assistant', content: message.text })),
+          ],
+          stream: false,
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
