@@ -1317,6 +1317,50 @@ async function handleProvisioningReconcile(req: IncomingMessage, res: ServerResp
   }
 }
 
+/** Reconcile every connector/app/plugin entitlement for the active tenant. */
+async function handleProvisioningReconcileAll(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+
+  const supabase = createSupabaseAdmin();
+  const [{ data: connectors, error: connectorError }, { data: entitlements, error: entitlementError }] = await Promise.all([
+    supabase.from('tenant_connectors').select('id,type,status').eq('tenant_id', auth.tenantId),
+    supabase.from('marketplace_app_entitlements').select('app_key,status,source').eq('tenant_id', auth.tenantId),
+  ]);
+  if (connectorError || entitlementError) {
+    return json(res, 500, { error: connectorError?.message || entitlementError?.message || 'Failed to load desired state' });
+  }
+
+  const desired = [
+    ...(connectors || []).map((row) => ({
+      sourceKind: 'connector' as const,
+      sourceId: row.id,
+      sourceKey: row.type,
+      activate: row.status === 'connected',
+    })),
+    ...(entitlements || []).map((row) => ({
+      sourceKind: row.source === 'plugin' ? 'plugin' as const : 'app' as const,
+      sourceId: row.app_key,
+      sourceKey: row.app_key,
+      activate: row.status === 'active',
+    })),
+  ];
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const item of desired) {
+    try {
+      const provisioning = await applyProvisioning({ ...item, tenantId: auth.tenantId, actor: auth.userId });
+      results.push({ ...item, ok: true, applied: provisioning.applied });
+    } catch (err) {
+      results.push({ ...item, ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const failed = results.filter((item) => item.ok === false).length;
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'provisioning.reconciled_all', resource: auth.tenantId, detail: { total: results.length, failed }, ip: getClientIp(req) });
+  json(res, failed ? 207 : 200, { ok: failed === 0, total: results.length, failed, results });
+}
+
 function normalizeAppKey(raw: unknown): string {
   const value = String(raw ?? '').trim().toLowerCase();
   const aliases: Record<string, string> = {
@@ -2939,6 +2983,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   }
   if (pathname === '/api/provisioning/reconcile' && method === 'POST') {
     return handleProvisioningReconcile(req, res);
+  }
+  if (pathname === '/api/provisioning/reconcile-all' && method === 'POST') {
+    return handleProvisioningReconcileAll(req, res);
   }
 
   // Live store data read-back — consumed by the dashboard and by the agent's
