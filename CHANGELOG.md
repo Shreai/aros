@@ -5,6 +5,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- Added context-aware Marketplace navigation from Apps, Connectors, Plugins, Skills, and Agents.
+- Standardized spacing between page search controls and installed-resource content.
+- Store connection management now supports title, details, access mode, provider configuration, and secure credential rotation with automatic re-testing.
+
 ### Planned / In Progress
 - Verify the post-flip security checks now that the redesign is the default: server-side rejects a mismatched `x-aros-tenant-id`, `Cache-Control: private, no-store` on the app shell, demo-leak checks (login shows empty states / no demo persona)
 - Converge the redesign canvas onto the shared `mib-widget` content-block contract (once the live fork picks up PR #38)

@@ -68,7 +68,7 @@ export async function testStore(auth: AuthScope, id: string): Promise<boolean> {
   return Boolean(result.result?.success);
 }
 
-export async function updateStore(auth: AuthScope, id: string, input: { name: string; description: string; accessMode: 'read' | 'read_write' }): Promise<StoreConnector> {
+export async function updateStore(auth: AuthScope, id: string, input: { name: string; description: string; accessMode: 'read' | 'read_write'; config?: Record<string, unknown>; secrets?: Record<string, string> }): Promise<StoreConnector> {
   const result = await request<{ connector: StoreConnector }>('/api/connectors', auth, { method: 'PATCH', body: JSON.stringify({ id, ...input }) });
   return result.connector;
 }

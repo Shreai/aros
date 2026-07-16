@@ -132,14 +132,19 @@ export function AppShell() {
     if (key === 'chat') { navigate('chat'); return; }
     navigate('app', key);
   };
+  const goMarketplace = (tab: 'apps' | 'connectors' | 'plugins' | 'skills' | 'agents') => {
+    const path = `/marketplace?tab=${tab}`;
+    window.history.pushState({}, '', path);
+    setSection('marketplace'); setMode('app'); setMenuOpen(false); setProfileOpen(false);
+  };
   const title = mode === 'chat' ? 'Concierge' : mode === 'home' ? 'Home' : SECTION_TITLES[section];
   const renderSection = () => {
     if (demo) return <SectionPanel section={section} onConnect={openWizard} />;
     if (section === 'stores') return <StoresPage key={storesVersion} onConnect={openWizard} />;
     if (section === 'marketplace') return <MarketplacePage />;
-    if (section === 'apps') return <AppsPage onBrowse={() => goSection('marketplace')} />;
-    if (section === 'connectors') return <ConnectorsPage onBrowse={() => goSection('marketplace')} />;
-    if (section === 'plugins') return <PluginsPage onBrowse={() => goSection('marketplace')} />;
+    if (section === 'apps') return <AppsPage onBrowse={() => goMarketplace('apps')} />;
+    if (section === 'connectors') return <ConnectorsPage onBrowse={() => goMarketplace('connectors')} />;
+    if (section === 'plugins') return <PluginsPage onBrowse={() => goMarketplace('plugins')} />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
     if (section === 'team') return <TeamPage />;
@@ -148,7 +153,7 @@ export function AppShell() {
     if (section === 'settings') return <SettingsPage />;
     if (section === 'skills' || section === 'agents' || section === 'models') {
       const kind = section === 'skills' ? 'skill' : section === 'agents' ? 'agent' : 'model';
-      return <IntelligencePage kind={kind} onBrowse={section === 'models' ? undefined : () => goSection('marketplace')} />;
+      return <IntelligencePage kind={kind} onBrowse={section === 'models' ? undefined : () => goMarketplace(section === 'skills' ? 'skills' : 'agents')} />;
     }
     return <SectionPanel section={section} onConnect={openWizard} />;
   };

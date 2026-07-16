@@ -2230,12 +2230,24 @@ async function handleConnectorsUpdate(req: IncomingMessage, res: ServerResponse)
   const accessMode = body?.accessMode === 'read_write' ? 'read_write' : 'read';
   if (!id || !name) return json(res, 400, { error: 'Connector id and title are required' });
   const supabase = createSupabaseAdmin();
-  const { data: current } = await supabase.from('tenant_connectors').select('config').eq('tenant_id', auth.tenantId).eq('id', id).single();
+  const { data: current } = await supabase.from('tenant_connectors').select('config, credentials_encrypted').eq('tenant_id', auth.tenantId).eq('id', id).single();
   if (!current) return json(res, 404, { error: 'Connector not found' });
-  const config = { ...(isRecord(current.config) ? current.config : {}), description, accessMode };
-  const { data, error } = await supabase.from('tenant_connectors').update({ name, config, updated_at: new Date().toISOString() }).eq('tenant_id', auth.tenantId).eq('id', id).select(CONNECTOR_COLUMNS).single();
-  if (error) return json(res, 500, { error: error.message });
-  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'connector.updated', resource: id, detail: { accessMode }, ip: getClientIp(req) });
+  const configUpdates = isRecord(body?.config) ? body.config : {};
+  const secretUpdates = isRecord(body?.secrets) ? Object.fromEntries(Object.entries(body.secrets).filter(([, value]) => typeof value === 'string' && value.trim())) : {};
+  const currentConfig = isRecord(current.config) ? current.config : {};
+  const configChanged = Object.entries(configUpdates).some(([key, value]) => currentConfig[key] !== value);
+  const config = { ...currentConfig, ...configUpdates, description, accessMode };
+  const update: Record<string, unknown> = { name, config, last_error: null, updated_at: new Date().toISOString() };
+  if (Object.keys(secretUpdates).length || configChanged) update.status = 'pending';
+  if (Object.keys(secretUpdates).length) {
+    ensureConnectorCrypto();
+    const existing = JSON.parse(decryptValue(current.credentials_encrypted)) as Record<string, string>;
+    update.credentials_encrypted = encryptValue(JSON.stringify({ ...existing, ...secretUpdates }));
+  }
+  const { data, error } = await supabase.from('tenant_connectors').update(update).eq('tenant_id', auth.tenantId).eq('id', id).select(CONNECTOR_COLUMNS).single();
+  if (error) return json(res, error.code === '23505' ? 409 : 500, { error: error.code === '23505' ? 'A connection with this title already exists.' : error.message });
+  storeSummaryCache.delete(auth.tenantId);
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'connector.updated', resource: id, detail: { accessMode, credentialsChanged: Object.keys(secretUpdates), configChanged: Object.keys(configUpdates) }, ip: getClientIp(req) });
   json(res, 200, { connector: data });
 }
 

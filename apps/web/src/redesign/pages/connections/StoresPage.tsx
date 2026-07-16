@@ -24,6 +24,8 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editAccess, setEditAccess] = useState<'read' | 'read_write'>('read');
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [editVisible, setEditVisible] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -61,10 +63,26 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
   function manage(store: StoreConnector) {
     setEditing(store); setEditName(store.name); setEditDescription(String(store.config?.description || ''));
     setEditAccess(store.config?.accessMode === 'read_write' ? 'read_write' : 'read');
+    const next: Record<string, string> = {};
+    for (const field of PROVIDERS[store.type]?.fields || []) if (!field.secret) next[field.key] = String(store.config?.[field.key] ?? '');
+    setEditValues(next); setEditVisible({}); setError('');
   }
   async function saveEdit(event: FormEvent) {
     event.preventDefault(); if (!editing) return; setBusy(`edit:${editing.id}`); setError('');
-    try { await updateStore(auth, editing.id, { name: editName.trim(), description: editDescription.trim(), accessMode: editAccess }); setEditing(null); await load(); }
+    try {
+      const config: Record<string, unknown> = {}; const secrets: Record<string, string> = {};
+      for (const field of PROVIDERS[editing.type].fields) {
+        const value = (editValues[field.key] || '').trim();
+        if (!value) continue;
+        if (field.secret) secrets[field.key] = value; else config[field.key] = field.key === 'port' ? Number(value) : value;
+      }
+      await updateStore(auth, editing.id, { name: editName.trim(), description: editDescription.trim(), accessMode: editAccess, config, secrets });
+      if (Object.keys(config).length || Object.keys(secrets).length) {
+        const valid = await testStore(auth, editing.id);
+        if (!valid) throw new Error('Changes were saved, but the updated credentials did not pass the connection test.');
+      }
+      setEditing(null); await load();
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Update failed'); } finally { setBusy(''); }
   }
 
@@ -82,6 +100,12 @@ export function StoresPage({ onConnect }: { onConnect?: () => void }) {
       const inputId = `store-${provider}-${field.key}`;
       return <label key={field.key} htmlFor={inputId}>{field.label}{field.optional ? ' (optional)' : ''}<span style={{ display: 'flex', gap: 8 }}><input id={inputId} style={{ flex: 1 }} type={isPassword && !visibleSecrets[field.key] ? 'password' : field.key === 'email' ? 'email' : 'text'} value={values[field.key] || ''} autoComplete={field.key === 'email' ? 'username' : isPassword ? 'current-password' : 'off'} onChange={e => setValues(current => ({ ...current, [field.key]: e.target.value }))} />{isPassword && <button className="setup-secondary" type="button" aria-label={`${visibleSecrets[field.key] ? 'Hide' : 'Show'} ${field.label}`} aria-pressed={Boolean(visibleSecrets[field.key])} onClick={() => setVisibleSecrets(current => ({ ...current, [field.key]: !current[field.key] }))}>{visibleSecrets[field.key] ? 'Hide' : 'Show'}</button>}</span></label>;
     })}<p className="modal-copy">Credentials are encrypted server-side and are never returned to this browser.</p><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setDialog(false)}>Cancel</button><button className="setup-primary" disabled={busy === 'create'}>{busy === 'create' ? 'Saving and testing…' : 'Save & test'}</button></div></div></form></div>}
-    {editing && <div className="setup-modal-backdrop" onMouseDown={e => { if (e.currentTarget === e.target) setEditing(null); }}><form className="setup-modal" role="dialog" aria-modal="true" aria-label="Manage connection" onSubmit={saveEdit}><div className="modal-title"><div><p className="setup-eyebrow">Connection settings</p><h2>Manage connection</h2></div><button className="modal-close" type="button" onClick={() => setEditing(null)} aria-label="Close">×</button></div><div className="connection-form"><label>Title<input value={editName} onChange={e => setEditName(e.target.value)} required /></label><label>Details<input value={editDescription} onChange={e => setEditDescription(e.target.value)} placeholder="Optional store or connection note" /></label><label>Access mode<select value={editAccess} onChange={e => setEditAccess(e.target.value as 'read' | 'read_write')}><option value="read">Read only</option><option value="read_write">Read + approval-gated writes</option></select></label><p className="modal-copy">Write mode never bypasses approval gates.</p><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setEditing(null)}>Cancel</button><button className="setup-primary" disabled={busy === `edit:${editing.id}`}>{busy === `edit:${editing.id}` ? 'Saving…' : 'Save changes'}</button></div></div></form></div>}
+    {editing && <div className="setup-modal-backdrop" onMouseDown={e => { if (e.currentTarget === e.target) setEditing(null); }}><form className="setup-modal" role="dialog" aria-modal="true" aria-label="Manage connection" onSubmit={saveEdit}>
+      <div className="modal-title"><div><p className="setup-eyebrow">Connection settings</p><h2>Manage connection</h2></div><button className="modal-close" type="button" onClick={() => setEditing(null)} aria-label="Close">×</button></div>
+      <div className="connection-form"><label>Title<input value={editName} onChange={e => setEditName(e.target.value)} required /></label><label>Details<input value={editDescription} onChange={e => setEditDescription(e.target.value)} placeholder="Optional store or connection note" /></label><label>Access mode<select value={editAccess} onChange={e => setEditAccess(e.target.value as 'read' | 'read_write')}><option value="read">Read only</option><option value="read_write">Read + approval-gated writes</option></select></label>
+        <div className="rsx-note"><div className="rsx-note__title">Connection credentials</div><div className="rsx-note__body">Update any value that changed. Secret fields stay blank because saved credentials are never returned; leave them blank to keep the current value.</div></div>
+        {PROVIDERS[editing.type].fields.map(field => { const isPassword = field.secret && field.key !== 'email'; return <label key={field.key}>{field.label}<span className={isPassword ? 'rsx-secret' : undefined}><input type={isPassword && !editVisible[field.key] ? 'password' : field.key === 'email' ? 'email' : 'text'} value={editValues[field.key] || ''} placeholder={field.secret ? 'Leave blank to keep current' : ''} onChange={e => setEditValues(current => ({ ...current, [field.key]: e.target.value }))} />{isPassword && <button className="rsx-secret__toggle" type="button" onClick={() => setEditVisible(current => ({ ...current, [field.key]: !current[field.key] }))}>{editVisible[field.key] ? 'Hide' : 'Show'}</button>}</span></label>; })}
+        <p className="modal-copy">Write mode never bypasses approval gates. Test the connection after changing credentials.</p><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setEditing(null)}>Cancel</button><button className="setup-primary" disabled={busy === `edit:${editing.id}`}>{busy === `edit:${editing.id}` ? 'Saving…' : 'Save changes'}</button></div>
+      </div></form></div>}
   </div>;
 }

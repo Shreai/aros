@@ -14,7 +14,8 @@ const AGENTS = [['ellie','Ellie','Store concierge and specialist router'], ['ana
 export function MarketplacePage() {
   const { session, tenant } = useAuth();
   const auth = useMemo(() => ({ accessToken: session?.access_token, tenantId: tenant?.id }), [session?.access_token, tenant?.id]);
-  const [tab, setTab] = useState<Tab>('apps');
+  const requestedTab = new URLSearchParams(window.location.search).get('tab');
+  const [tab, setTab] = useState<Tab>(TABS.some(item => item.id === requestedTab) ? requestedTab as Tab : 'apps');
   const [apps, setApps] = useState<PlatformApp[]>([]); const [grants, setGrants] = useState<AppGrant[]>([]); const [skills, setSkills] = useState<CapabilityResource[]>([]);
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [busy, setBusy] = useState(''); const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<PlatformApp | null>(null);
@@ -26,7 +27,7 @@ export function MarketplacePage() {
   const catalog = tab === 'connectors' ? CONNECTORS : tab === 'plugins' ? PLUGINS : AGENTS;
   return <div className="rsx-panel rsx-marketplace-layout">
     <div className="rsx-panel__head"><div><div className="rsx-panel__eyebrow">Marketplace</div><p className="rsx-panel__lead">Discover apps and review their access before activating them.</p></div></div>
-    <div className="rsx2-tabs" role="tablist">{TABS.map(item => <button key={item.id} role="tab" aria-selected={tab === item.id} className={`rsx2-tab ${tab === item.id ? 'is-on' : ''}`} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
+    <div className="rsx2-tabs" role="tablist">{TABS.map(item => <button key={item.id} role="tab" aria-selected={tab === item.id} className={`rsx2-tab ${tab === item.id ? 'is-on' : ''}`} onClick={() => { setTab(item.id); setQuery(''); window.history.replaceState({}, '', `/marketplace?tab=${item.id}`); }}>{item.label}</button>)}</div>
     <div className="rsx-form"><label className="rsx-form__field"><span className="rsx-form__label">Search Marketplace</span><input className="rsx-form__input" value={query} onChange={event => setQuery(event.target.value)} placeholder={`Search ${tab}`} /></label></div>
     {error && <div className="rsx-note" role="alert"><div className="rsx-note__title">Marketplace unavailable</div><div className="rsx-note__body">{error}</div><button className="rsx-row__btn" onClick={() => void load()}>Retry</button></div>}
     {tab === 'apps' ? loading ? <Empty text="Loading apps…" /> : <div className="rsx-cards">{apps.filter(app => `${app.name} ${app.description || ''}`.toLowerCase().includes(q)).map(app => { const enabled = active.has(app.id); const unavailable = app.status === 'planned'; return <article className="rsx-card" key={app.id}><div className="rsx-card__top"><div className="rsx-card__icon">{app.icon || app.name.slice(0,2).toUpperCase()}</div><div className="rsx-card__title">{app.name}</div></div><div className="rsx-card__desc">{app.description || 'AROS application'}</div><div className="rsx-card__desc">{(app.required_scopes || []).length ? `Access: ${app.required_scopes!.join(', ')}` : 'No additional scopes requested.'}</div><div className="rsx-card__foot"><span className={`rsx-badge rsx-badge--${enabled ? 'on' : unavailable ? 'warn' : 'off'}`}>{enabled ? 'Active' : unavailable ? 'Planned' : 'Inactive'}</span>{enabled && app.url && <a className="rsx-card__btn" href={app.url} target="_blank" rel="noreferrer">Open dashboard</a>}<button className="rsx-card__btn" disabled={Boolean(busy) || unavailable} onClick={() => setSelected(app)}>{unavailable ? 'Coming soon' : enabled ? 'Configure' : 'Activate'}</button></div></article>; })}</div>
