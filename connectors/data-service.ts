@@ -91,7 +91,7 @@ function todayRange(): { from: string; to: string } {
   const m = String(now.getUTCMonth() + 1).padStart(2, '0');
   const d = String(now.getUTCDate()).padStart(2, '0');
   const day = `${y}-${m}-${d}`;
-  return { from: `${day}T00:00:00`, to: `${day}T23:59:59` };
+  return { from: day, to: day };
 }
 
 function normalizeBusinessDate(value: string | null): string | null {
@@ -243,7 +243,9 @@ export async function fetchStoreSalesRange(
     const passwordRef = await storeCredential(`${record.id}:sales-password`, record.secrets.password ?? '');
     refs.push(emailRef, passwordRef);
     const session = await rapidRms.authenticate({ baseUrl: String(record.config.baseUrl || 'https://rapidrmsapi.azurewebsites.net'), clientId: String(record.config.clientId || ''), sessionTimeout: Number(record.config.sessionTimeout) || 420 }, emailRef, passwordRef);
-    const rows = await fetchInvoiceRows(session, { FromDate: `${from}T00:00:00`, ToDate: `${to}T23:59:59` });
+    // Match MIB's proven RapidRMS contract: InvoiceReport expects calendar
+    // dates here, not timestamps with appended time components.
+    const rows = await fetchInvoiceRows(session, { FromDate: from, ToDate: to });
     const buckets = new Map<string, { revenue: number; invoices: Set<string>; rows: number }>();
     for (const row of rows) {
       const dateValue = pickStr(row, SALES_DATE_FIELDS);
