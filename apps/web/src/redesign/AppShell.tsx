@@ -2,6 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { useArosTheme } from '../lib/useArosTheme';
 import { ConciergeChat } from './ConciergeChat';
 import { SectionPanel } from './SectionPanel';
+import { IntelligencePage } from './pages/intelligence';
+import { StoresPage, AppsPage } from './pages/connections';
+import {
+  BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage,
+} from './pages/admin';
 import { ConnectWizard } from './ConnectWizard';
 import { Canvas } from './Canvas';
 import { Home } from './Home';
@@ -9,6 +14,7 @@ import { HistoryPanel } from './HistoryPanel';
 import { branding } from './branding';
 import { type CanvasWidgetItem } from '../aros-ai/canvas';
 import { useIdentity } from './data';
+import { useAuth } from '../contexts/AuthContext';
 import {
   PRIMARY_NAV, WORKSPACE_NAV, USER, ROLES, SECTION_TITLES, type SectionKey, type NavItem, type ChatMsg, type Conversation,
 } from './shellData';
@@ -63,6 +69,7 @@ function UserRow({ onClick }: { onClick: () => void }) {
 }
 
 export function AppShell() {
+  const { signOut } = useAuth();
   const b = branding();
   const ident = useIdentity();
   const initialRoute = routeState();
@@ -127,6 +134,21 @@ export function AppShell() {
     navigate('app', key);
   };
   const title = mode === 'chat' ? 'Concierge' : mode === 'home' ? 'Home' : SECTION_TITLES[section];
+  const renderSection = () => {
+    if (section === 'stores') return <StoresPage />;
+    if (section === 'apps') return <AppsPage />;
+    if (section === 'permissions') return <PermissionsPage />;
+    if (section === 'health') return <ConnectionHealthPage />;
+    if (section === 'team') return <TeamPage />;
+    if (section === 'billing') return <BillingPage />;
+    if (section === 'usage') return <UsagePage />;
+    if (section === 'settings') return <SettingsPage />;
+    if (section === 'skills' || section === 'agents' || section === 'models') {
+      const kind = section === 'skills' ? 'skill' : section === 'agents' ? 'agent' : 'model';
+      return <IntelligencePage kind={kind} />;
+    }
+    return <SectionPanel section={section} onConnect={openWizard} />;
+  };
 
   return (
     <div className="rsx2-shell" data-chat={mode === 'chat' ? 'open' : 'closed'} data-mode={mode}>
@@ -194,7 +216,7 @@ export function AppShell() {
           <main className="rsx2-content">
             {mode === 'home'
               ? <Home onAskShre={askShre} onConnect={openWizard} onSection={goSection} />
-              : <SectionPanel section={section} onConnect={openWizard} />}
+              : renderSection()}
           </main>
         </div>
       )}
@@ -247,7 +269,7 @@ export function AppShell() {
           </div>
           <div className="rsx2-nav__foot">
             <button className="aros-topbar__toggle rsx2-show-sm" onClick={toggleTheme} style={{ width: '100%', marginBottom: 8 }}>{themeLabel} mode</button>
-            <button className="rsx2-signout" style={{ width: '100%' }}>Sign out</button>
+            <button className="rsx2-signout" style={{ width: '100%' }} onClick={() => void signOut()}>Sign out</button>
           </div>
         </aside>
       )}
