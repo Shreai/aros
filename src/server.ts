@@ -1339,6 +1339,11 @@ async function handleMarketplaceDisable(req: IncomingMessage, res: ServerRespons
 
     if (error) throw error;
 
+    await supabase.from('tenant_resources').update({
+      status: 'inactive',
+      health: { state: 'disabled', checkedAt: new Date().toISOString() },
+    }).eq('tenant_id', auth.tenantId).eq('kind', 'app').eq('provider', appKey);
+
     await auditLog({
       tenantId: auth.tenantId,
       userId: auth.userId,
@@ -1424,16 +1429,39 @@ async function handlePlatformApps(req: IncomingMessage, res: ServerResponse, app
   }
   if (!appId) return json(res, 400, { error: 'app id required' });
   if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
-  const { data: app } = await supabase.from('platform_apps').select('id,required_scopes,status').eq('id', appId).single();
+  const { data: app } = await supabase.from('platform_apps').select('id,name,launch_url,required_scopes,status').eq('id', appId).single();
   if (!app) return json(res, 404, { error: 'App not found' });
   if (app.status === 'planned') return json(res, 409, { error: 'This app is not available yet' });
   const body = await parseJsonBody(req) || {};
   const requested = Array.isArray(body.scopes) ? body.scopes.map(String) : app.required_scopes;
   const allowed = new Set<string>(app.required_scopes || []);
   if (requested.some((scope: string) => !allowed.has(scope))) return json(res, 400, { error: 'Scope is not registered for this app' });
-  const { data, error } = await supabase.from('marketplace_app_entitlements').upsert({ tenant_id: auth.tenantId, app_key: appId, status: 'active', source: 'aros-app-catalog', enabled_by: auth.userId, enabled_at: new Date().toISOString(), disabled_at: null, service_config: { scopes: requested } }, { onConflict: 'tenant_id,app_key' }).select().single();
+  const requestedStoreIds = Array.isArray(body.storeIds) ? [...new Set(body.storeIds.map(String))] : [];
+  const { data: validStores, error: storeError } = requestedStoreIds.length ? await supabase.from('tenant_connectors').select('id').eq('tenant_id', auth.tenantId).eq('status', 'connected').in('id', requestedStoreIds) : { data: [], error: null };
+  if (storeError) return json(res, 500, { error: storeError.message });
+  if ((validStores || []).length !== requestedStoreIds.length) return json(res, 400, { error: 'Store access includes an unavailable or unhealthy connection' });
+  const storeIds = (validStores || []).map(store => store.id);
+  const activationState = storeIds.length ? 'ready' : 'needs_store';
+  const { data, error } = await supabase.from('marketplace_app_entitlements').upsert({ tenant_id: auth.tenantId, app_key: appId, status: 'active', source: 'aros-app-catalog', enabled_by: auth.userId, enabled_at: new Date().toISOString(), disabled_at: null, service_config: { scopes: requested, storeIds, activationState } }, { onConflict: 'tenant_id,app_key' }).select().single();
   if (error) return json(res, 500, { error: error.message });
-  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'app.granted', resource: `app:${appId}`, detail: { scopes: requested }, ip: getClientIp(req) });
+  const appCapabilities: Record<string, string[]> = {
+    storepulse: ['stores.read', 'pos.sales.read', 'pos.inventory.read', 'connection.health.read'],
+  };
+  const capabilities = appCapabilities[appId] || requested;
+  const { error: resourceError } = await supabase.from('tenant_resources').upsert({
+    tenant_id: auth.tenantId,
+    kind: 'app',
+    provider: appId,
+    name: app.name,
+    status: activationState === 'ready' ? 'active' : 'configuring',
+    config: { appKey: appId, launchUrl: app.launch_url, activationState },
+    store_ids: storeIds,
+    capabilities,
+    health: { state: activationState, checkedAt: new Date().toISOString(), detail: storeIds.length ? `${storeIds.length} connected store${storeIds.length === 1 ? '' : 's'} mapped` : 'Connect a healthy store to begin syncing' },
+    created_by: auth.userId,
+  }, { onConflict: 'tenant_id,kind,name' });
+  if (resourceError) return json(res, 500, { error: resourceError.message });
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'app.granted', resource: `app:${appId}`, detail: { scopes: requested, storeIds, activationState, capabilities }, ip: getClientIp(req) });
   json(res, 200, { grant: data });
 }
 
