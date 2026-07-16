@@ -6,6 +6,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Expanded the AROS connector Marketplace and linked Gmail, Google Workspace, Microsoft 365, Slack, HubSpot, Mailchimp, SendGrid, and Twilio setup to the canonical MIB configuration surfaces.
 - Models now load from the live Shre router catalog, and chat supports explicit Auto, Claude, OpenAI, Gemini, and other connected model selection.
 - Chat responses identify the model that actually answered, including transparent local fallback.
 - Commander setup now creates the canonical store mapping and a one-time Edge pairing code in the same flow.
