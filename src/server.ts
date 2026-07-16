@@ -41,13 +41,13 @@ import {
 } from './human-state.js';
 import { createTask } from '../tasks/store.js';
 import type { TaskPriority } from '../tasks/types.js';
-import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
 import { DEFAULT_MODEL } from './model-defaults.js';
 import { testConnection as testRapidRmsConnector } from '../connectors/rapidrms-api.js';
 import { testConnection as testAzureDbConnector } from '../connectors/azure-db.js';
 import { testConnection as testVerifoneConnector } from '../connectors/verifone/connector.js';
 import { setTenantSecret, storeCredential, deleteCredential } from '../connectors/vault-ref.js';
-import { fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
+import { fetchStoreSalesRange, fetchStoreSummary, type StoreSummary } from '../connectors/data-service.js';
 import { replicateSnapshotToCortex } from '../connectors/cortex-bridge.js';
 import { encryptValue, decryptValue, setEncryptionKey } from '../security/input-handler.js';
 import { handleEdgeRequest } from './edge/http.js';
@@ -83,26 +83,11 @@ if (process.env.NODE_ENV === 'production' && oidcStoreMode !== 'supabase') throw
 const oidcEnvelopeKey = process.env.AROS_OIDC_ENCRYPTION_KEY || process.env.AROS_ENCRYPTION_KEY;
 if (oidcStoreMode === 'supabase' && !oidcEnvelopeKey) throw new Error('Durable OIDC requires AROS_OIDC_ENCRYPTION_KEY from the secrets vault');
 if (oidcEnvelopeKey) setEncryptionKey(createHash('sha256').update(oidcEnvelopeKey).digest());
-const oidcStore = oidcStoreMode === 'supabase'
-  ? createSupabaseOidcStore(createSupabaseAdmin(), { seal: encryptValue, open: decryptValue })
-  : createMemoryOidcStore();
-try { await oidcStore.cleanup(Date.now()); }
-catch (error) { if (process.env.NODE_ENV === 'production') throw new Error(`Durable OIDC store unavailable: ${error instanceof Error ? error.message : String(error)}`); }
+const oidcStore = oidcStoreMode === 'supabase' ? createSupabaseOidcStore(createSupabaseAdmin(), { seal: encryptValue, open: decryptValue }) : createMemoryOidcStore();
+try { await oidcStore.cleanup(Date.now()); } catch (error) { if (process.env.NODE_ENV === 'production') throw new Error(`Durable OIDC store unavailable: ${error instanceof Error ? error.message : String(error)}`); }
 const oidcCleanupTimer = setInterval(() => { void oidcStore.cleanup(Date.now()).catch(error => console.error('[oidc.cleanup]', error instanceof Error ? error.message : error)); }, 300_000);
 oidcCleanupTimer.unref();
-const oidcRp = createOidcRelyingParty({
-  store: oidcStore,
-  redirectUri: process.env.OIDC_REDIRECT_URI || 'https://app.aros.live/auth/callback',
-  sessionTtlMs: Number(process.env.OIDC_SESSION_TTL_SECONDS || 3600) * 1000,
-  mapWorkspace: async (subject, requestedWorkspace) => {
-    const supabase = createSupabaseAdmin();
-    let query = supabase.from('tenant_members').select('tenant_id,role,status').eq('user_id', subject).eq('status', 'active');
-    if (requestedWorkspace) query = query.eq('tenant_id', requestedWorkspace);
-    const { data } = await query.order('is_default', { ascending: false }).limit(1);
-    const membership = data?.[0];
-    return membership ? { workspaceId: membership.tenant_id, role: membership.role } : null;
-  },
-});
+const oidcRp = createOidcRelyingParty({ store: oidcStore, redirectUri: process.env.OIDC_REDIRECT_URI || 'https://app.aros.live/auth/callback', sessionTtlMs: Number(process.env.OIDC_SESSION_TTL_SECONDS || 3600) * 1000, mapWorkspace: async (subject, requestedWorkspace) => { const supabase = createSupabaseAdmin(); let query = supabase.from('tenant_members').select('tenant_id,role,status').eq('user_id', subject).eq('status', 'active'); if (requestedWorkspace) query = query.eq('tenant_id', requestedWorkspace); const { data } = await query.order('is_default', { ascending: false }).limit(1); const membership = data?.[0]; return membership ? { workspaceId: membership.tenant_id, role: membership.role } : null; } });
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -204,11 +189,7 @@ async function sendStaticFile(res: ServerResponse, filePath: string): Promise<bo
     if (!fileStat.isFile()) return false;
     const ext = extname(filePath);
     const headers: Record<string, string> = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
-    // Fingerprinted assets are safe to cache forever; the HTML shell (and the
-    // index.html SPA fallback) must never be stored by a shared cache/CDN, since
-    // it bootstraps an authenticated session.
     if (filePath.includes('/assets/')) headers['Cache-Control'] = 'public, max-age=31536000, immutable';
-    else headers['Cache-Control'] = 'private, no-store';
     res.writeHead(200, headers);
     res.end(await readFile(filePath));
     return true;
@@ -1209,11 +1190,7 @@ function getRequestedTenantId(req: IncomingMessage): string | null {
 
 async function authenticateRequest(req: IncomingMessage): Promise<AuthContext | null> {
   const oidcSession = await oidcRp.authenticate(req.headers.cookie);
-  if (oidcSession) {
-    const requestedTenantId = getRequestedTenantId(req);
-    if (requestedTenantId && requestedTenantId !== oidcSession.workspaceId) return null;
-    return { userId: oidcSession.subject, tenantId: oidcSession.workspaceId, role: oidcSession.role };
-  }
+  if (oidcSession) { const requestedTenantId = getRequestedTenantId(req); if (requestedTenantId && requestedTenantId !== oidcSession.workspaceId) return null; return { userId: oidcSession.subject, tenantId: oidcSession.workspaceId, role: oidcSession.role }; }
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) return null;
 
@@ -1224,22 +1201,21 @@ async function authenticateRequest(req: IncomingMessage): Promise<AuthContext | 
     if (error || !user) return null;
 
     const requestedTenantId = getRequestedTenantId(req);
-    let membershipQuery = supabase
-      .from('tenant_members')
-      .select('tenant_id, role, status')
-      .eq('user_id', user.id)
-      .eq('status', 'active');
-
-    if (requestedTenantId) {
-      membershipQuery = membershipQuery.eq('tenant_id', requestedTenantId);
+    let membership: { tenant_id: string; role: string; status: string } | undefined;
+    for (let attempt = 0; attempt < 2 && !membership; attempt += 1) {
+      let membershipQuery = supabase
+        .from('tenant_members')
+        .select('tenant_id, role, status')
+        .eq('user_id', user.id)
+        .eq('status', 'active');
+      if (requestedTenantId) membershipQuery = membershipQuery.eq('tenant_id', requestedTenantId);
+      const { data: memberships, error: membershipError } = await membershipQuery
+        .order('is_default', { ascending: false })
+        .order('joined_at', { ascending: true })
+        .limit(1);
+      if (!membershipError) membership = memberships?.[0];
+      if (!membership && attempt === 0) await new Promise(resolve => setTimeout(resolve, 250));
     }
-
-    const { data: memberships } = await membershipQuery
-      .order('is_default', { ascending: false })
-      .order('joined_at', { ascending: true })
-      .limit(1);
-
-    const membership = memberships?.[0];
 
     if (!membership) return null;
     return {
@@ -1254,67 +1230,6 @@ async function authenticateRequest(req: IncomingMessage): Promise<AuthContext | 
 
 function canManageMarketplace(role: string): boolean {
   return ['owner', 'admin'].includes(role);
-}
-
-const PROVISIONING_MANIFESTS: Record<string, string> = {
-  'rapidrms-api': 'connector.rapidrms-api.v1',
-  'verifone-commander': 'connector.verifone-commander.v1',
-  'azure-db': 'connector.azure-db.v1',
-};
-
-async function applyProvisioning(input: {
-  tenantId: string; sourceKind: 'connector' | 'app' | 'plugin'; sourceId: string;
-  sourceKey: string; activate: boolean; actor: string;
-}): Promise<{ applied: boolean; result?: unknown }> {
-  const manifestKey = input.sourceKind === 'connector'
-    ? PROVISIONING_MANIFESTS[input.sourceKey]
-    : `${input.sourceKind}.${normalizeAppKey(input.sourceKey)}.v1`;
-  if (!manifestKey) return { applied: false };
-  const { data, error } = await createSupabaseAdmin().rpc('apply_provisioning_manifest', {
-    p_tenant_id: input.tenantId, p_source_kind: input.sourceKind, p_source_id: input.sourceId,
-    p_manifest_key: manifestKey, p_activate: input.activate, p_actor: input.actor,
-  });
-  // Apps/plugins may be entitled before their provisioning manifest ships.
-  // Missing manifests remain an explicit no-op; all other database failures
-  // fail the lifecycle operation rather than leaving partial resources.
-  if (error?.code === 'P0002') return { applied: false };
-  if (error) throw new Error(`Resource provisioning failed: ${error.message}`);
-  return { applied: true, result: data };
-}
-
-async function handleProvisioningReconcile(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const auth = await authenticateRequest(req);
-  if (!auth) return json(res, 401, { error: 'Authentication required' });
-  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
-  const body = await parseJsonBody(req);
-  if (!body) return json(res, 400, { error: 'Invalid JSON' });
-  const sourceKind = body.sourceKind === 'connector' ? 'connector' : body.sourceKind === 'plugin' ? 'plugin' : body.sourceKind === 'app' ? 'app' : null;
-  const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim() : '';
-  if (!sourceKind || !sourceId) return json(res, 400, { error: 'sourceKind and sourceId are required' });
-  const supabase = createSupabaseAdmin();
-  try {
-    let sourceKey = sourceId;
-    let activate = false;
-    if (sourceKind === 'connector') {
-      const { data } = await supabase.from('tenant_connectors').select('id,type,status').eq('tenant_id', auth.tenantId).eq('id', sourceId).maybeSingle();
-      if (!data) return json(res, 404, { error: 'Connector not found' });
-      sourceKey = data.type;
-      activate = data.status === 'connected';
-    } else {
-      const appKey = normalizeAppKey(sourceId);
-      const { data } = await supabase.from('marketplace_app_entitlements').select('app_key,status,source').eq('tenant_id', auth.tenantId).eq('app_key', appKey).maybeSingle();
-      if (!data) return json(res, 404, { error: 'Entitlement not found' });
-      sourceKey = data.app_key;
-      activate = data.status === 'active';
-      if (sourceKind === 'plugin' && data.source !== 'plugin') return json(res, 409, { error: 'Entitlement is not a plugin source' });
-    }
-    const provisioning = await applyProvisioning({ tenantId: auth.tenantId, sourceKind, sourceId, sourceKey, activate, actor: auth.userId });
-    await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'provisioning.reconciled', resource: `${sourceKind}:${sourceId}`, detail: { activate, applied: provisioning.applied }, ip: getClientIp(req) });
-    json(res, 200, { ok: true, desiredState: activate ? 'active' : 'inactive', provisioning });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Provisioning reconciliation failed';
-    json(res, 500, { error: message });
-  }
 }
 
 function normalizeAppKey(raw: unknown): string {
@@ -1333,6 +1248,66 @@ function normalizeAppKey(raw: unknown): string {
     'centrix.aros.live': 'centrix',
   };
   return (aliases[value] ?? value).replace(/[^a-z0-9._-]/g, '-').replace(/-+/g, '-');
+}
+
+type AppLaunchGrant = {
+  appKey: string;
+  tenantId: string;
+  userId: string;
+  role: string;
+  storeIds: string[];
+  expiresAt: number;
+};
+
+const appLaunchGrants = new Map<string, AppLaunchGrant>();
+const APP_LAUNCH_TTL_MS = 60_000;
+
+function hashAppLaunchCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex');
+}
+
+async function handleAppLaunchCreate(req: IncomingMessage, res: ServerResponse, appKeyParam: string): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const appKey = normalizeAppKey(appKeyParam);
+  const supabase = createSupabaseAdmin();
+  const [{ data: app }, { data: entitlement }] = await Promise.all([
+    supabase.from('platform_apps').select('id,launch_url,status').eq('id', appKey).maybeSingle(),
+    supabase.from('marketplace_app_entitlements').select('status,service_config').eq('tenant_id', auth.tenantId).eq('app_key', appKey).maybeSingle(),
+  ]);
+  if (!app || app.status !== 'active') return json(res, 409, { error: 'This app is not launch-ready' });
+  if (entitlement?.status !== 'active') return json(res, 403, { error: 'Activate this app before opening it' });
+  if (appKey !== 'storepulse') return json(res, 409, { error: 'This app has not completed the workspace SSO contract' });
+  const code = randomBytes(32).toString('base64url');
+  const storeIds = Array.isArray(entitlement.service_config?.storeIds) ? entitlement.service_config.storeIds.map(String) : [];
+  appLaunchGrants.set(hashAppLaunchCode(code), { appKey, tenantId: auth.tenantId, userId: auth.userId, role: auth.role, storeIds, expiresAt: Date.now() + APP_LAUNCH_TTL_MS });
+  for (const [key, grant] of appLaunchGrants) if (grant.expiresAt <= Date.now()) appLaunchGrants.delete(key);
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'app.launch_started', resource: `app:${appKey}`, detail: { appKey, storeCount: storeIds.length }, ip: getClientIp(req) });
+  const launchUrl = new URL('/api/auth/aros-launch', app.launch_url);
+  launchUrl.searchParams.set('code', code);
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, { launchUrl: launchUrl.toString(), expiresIn: APP_LAUNCH_TTL_MS / 1000 });
+}
+
+async function handleAppLaunchConsume(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await parseJsonBody(req);
+  const code = typeof body?.code === 'string' ? body.code : '';
+  const appKey = normalizeAppKey(body?.appKey);
+  if (!code || !appKey) return json(res, 400, { error: 'code and appKey are required' });
+  const key = hashAppLaunchCode(code);
+  const grant = appLaunchGrants.get(key);
+  appLaunchGrants.delete(key);
+  res.setHeader('Cache-Control', 'no-store');
+  if (!grant || grant.expiresAt <= Date.now() || grant.appKey !== appKey) return json(res, 401, { error: 'Launch code is invalid or expired' });
+  const supabase = createSupabaseAdmin();
+  const [{ data: userResult }, { data: connectors }] = await Promise.all([
+    supabase.auth.admin.getUserById(grant.userId),
+    grant.storeIds.length ? supabase.from('tenant_connectors').select('id,type,name,config,status').eq('tenant_id', grant.tenantId).in('id', grant.storeIds) : Promise.resolve({ data: [] }),
+  ]);
+  const user = userResult?.user;
+  if (!user) return json(res, 401, { error: 'Workspace user is no longer available' });
+  await auditLog({ tenantId: grant.tenantId, userId: grant.userId, action: 'app.launch_consumed', resource: `app:${appKey}`, detail: { appKey }, ip: getClientIp(req) });
+  json(res, 200, { appKey, tenantId: grant.tenantId, userId: grant.userId, email: user.email || '', name: user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'User', role: grant.role, stores: connectors || [] });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1397,8 +1372,6 @@ async function handleMarketplaceInstall(req: IncomingMessage, res: ServerRespons
 
     if (error) throw error;
 
-    const provisioning = await applyProvisioning({ tenantId: auth.tenantId, sourceKind: 'app', sourceId: appKey, sourceKey: appKey, activate: true, actor: auth.userId });
-
     await auditLog({
       tenantId: auth.tenantId,
       userId: auth.userId,
@@ -1408,7 +1381,7 @@ async function handleMarketplaceInstall(req: IncomingMessage, res: ServerRespons
       ip: getClientIp(req),
     });
 
-    json(res, 200, { ok: true, entitlement: data, provisioning });
+    json(res, 200, { ok: true, entitlement: data });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to install marketplace app';
     console.error('[marketplace.install]', message);
@@ -1439,7 +1412,10 @@ async function handleMarketplaceDisable(req: IncomingMessage, res: ServerRespons
 
     if (error) throw error;
 
-    const provisioning = await applyProvisioning({ tenantId: auth.tenantId, sourceKind: 'app', sourceId: appKey, sourceKey: appKey, activate: false, actor: auth.userId });
+    await supabase.from('tenant_resources').update({
+      status: 'inactive',
+      health: { state: 'disabled', checkedAt: new Date().toISOString() },
+    }).eq('tenant_id', auth.tenantId).eq('kind', 'app').eq('provider', appKey);
 
     await auditLog({
       tenantId: auth.tenantId,
@@ -1450,7 +1426,7 @@ async function handleMarketplaceDisable(req: IncomingMessage, res: ServerRespons
       ip: getClientIp(req),
     });
 
-    json(res, 200, { ok: true, entitlement: data, provisioning });
+    json(res, 200, { ok: true, entitlement: data });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to disable marketplace app';
     console.error('[marketplace.disable]', message);
@@ -1526,16 +1502,50 @@ async function handlePlatformApps(req: IncomingMessage, res: ServerResponse, app
   }
   if (!appId) return json(res, 400, { error: 'app id required' });
   if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
-  const { data: app } = await supabase.from('platform_apps').select('id,required_scopes,status').eq('id', appId).single();
+  const { data: app } = await supabase.from('platform_apps').select('id,name,launch_url,required_scopes,status').eq('id', appId).single();
   if (!app) return json(res, 404, { error: 'App not found' });
-  if (app.status === 'planned') return json(res, 409, { error: 'This app is not available yet' });
+  if (app.status !== 'active') return json(res, 409, { error: 'This app has not completed its launch and workspace SSO contract' });
   const body = await parseJsonBody(req) || {};
   const requested = Array.isArray(body.scopes) ? body.scopes.map(String) : app.required_scopes;
   const allowed = new Set<string>(app.required_scopes || []);
   if (requested.some((scope: string) => !allowed.has(scope))) return json(res, 400, { error: 'Scope is not registered for this app' });
-  const { data, error } = await supabase.from('marketplace_app_entitlements').upsert({ tenant_id: auth.tenantId, app_key: appId, status: 'active', source: 'aros-app-catalog', enabled_by: auth.userId, enabled_at: new Date().toISOString(), disabled_at: null, service_config: { scopes: requested } }, { onConflict: 'tenant_id,app_key' }).select().single();
+  const requestedStoreIds = Array.isArray(body.storeIds) ? [...new Set(body.storeIds.map(String))] : [];
+  const { data: validStores, error: storeError } = requestedStoreIds.length ? await supabase.from('tenant_connectors').select('id').eq('tenant_id', auth.tenantId).eq('status', 'connected').in('id', requestedStoreIds) : { data: [], error: null };
+  if (storeError) return json(res, 500, { error: storeError.message });
+  if ((validStores || []).length !== requestedStoreIds.length) return json(res, 400, { error: 'Store access includes an unavailable or unhealthy connection' });
+  const storeIds = (validStores || []).map(store => store.id);
+  const activationState = storeIds.length ? 'ready' : 'needs_store';
+  const { data, error } = await supabase.from('marketplace_app_entitlements').upsert({ tenant_id: auth.tenantId, app_key: appId, status: 'active', source: 'aros-app-catalog', enabled_by: auth.userId, enabled_at: new Date().toISOString(), disabled_at: null, service_config: { scopes: requested, storeIds, activationState } }, { onConflict: 'tenant_id,app_key' }).select().single();
   if (error) return json(res, 500, { error: error.message });
-  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'app.granted', resource: `app:${appId}`, detail: { scopes: requested }, ip: getClientIp(req) });
+  const appCapabilities: Record<string, string[]> = {
+    storepulse: ['stores.read', 'pos.sales.read', 'pos.inventory.read', 'connection.health.read'],
+  };
+  const capabilities = appCapabilities[appId] || requested;
+  const { error: resourceError } = await supabase.from('tenant_resources').upsert({
+    tenant_id: auth.tenantId,
+    kind: 'app',
+    provider: appId,
+    name: app.name,
+    status: activationState === 'ready' ? 'active' : 'configuring',
+    config: { appKey: appId, launchUrl: app.launch_url, activationState },
+    store_ids: storeIds,
+    capabilities,
+    health: { state: activationState, checkedAt: new Date().toISOString(), detail: storeIds.length ? `${storeIds.length} connected store${storeIds.length === 1 ? '' : 's'} mapped` : 'Connect a healthy store to begin syncing' },
+    created_by: auth.userId,
+  }, { onConflict: 'tenant_id,kind,name' });
+  if (resourceError) return json(res, 500, { error: resourceError.message });
+  const bundle = APP_CAPABILITY_BUNDLES[appId];
+  if (bundle?.skills.length) {
+    const skillRows = bundle.skills.map(skill => ({
+      tenant_id: auth.tenantId, kind: 'skill', provider: appId, name: skill.name,
+      status: activationState === 'ready' ? 'active' : 'configuring', capabilities: skill.capabilities,
+      config: { appKey: appId, managedByApp: true }, store_ids: storeIds,
+      health: { state: activationState, checkedAt: new Date().toISOString() }, created_by: auth.userId,
+    }));
+    const { error: skillError } = await supabase.from('tenant_resources').upsert(skillRows, { onConflict: 'tenant_id,kind,name' });
+    if (skillError) return json(res, 500, { error: skillError.message });
+  }
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'app.granted', resource: `app:${appId}`, detail: { scopes: requested, storeIds, activationState, capabilities }, ip: getClientIp(req) });
   json(res, 200, { grant: data });
 }
 
@@ -2061,6 +2071,207 @@ async function handleStoreSummary(req: IncomingMessage, res: ServerResponse): Pr
   json(res, 200, summary ? { connected: true, summary } : { connected: false, summary: null });
 }
 
+async function handleStoreSales(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  const request = getRequestUrl(req);
+  let tenantId = auth?.tenantId || '';
+  if (!auth) {
+    const serviceToken = readServiceToken();
+    const presented = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+    const source = Array.isArray(req.headers['x-service-source']) ? req.headers['x-service-source'][0] : req.headers['x-service-source'];
+    tenantId = request.searchParams.get('tenantId') || '';
+    if (!serviceToken || source !== 'shre-router' || !tokensMatch(presented, serviceToken) || !UUID_RE.test(tenantId)) return json(res, 401, { error: 'Authentication required' });
+  }
+  const to = request.searchParams.get('to') || businessDate();
+  const from = request.searchParams.get('from') || to;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to) return json(res, 400, { error: 'from and to must be a valid date range' });
+  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  if (days > 31) return json(res, 413, { error: 'Interactive sales queries are limited to 31 days. Start a historical sync for larger ranges.' });
+  try {
+    const supabase = createSupabaseAdmin();
+    const { data: rows } = await supabase.from('tenant_connectors').select(`${CONNECTOR_COLUMNS}, credentials_encrypted`).eq('tenant_id', tenantId).eq('type', 'rapidrms-api').eq('status', 'connected').limit(1);
+    const row = rows?.[0];
+    if (!row) return json(res, 404, { error: 'No healthy RapidRMS connection is mapped to this workspace' });
+    ensureConnectorCrypto();
+    const secrets = JSON.parse(decryptValue(row.credentials_encrypted)) as Record<string, string>;
+    const daily = await fetchStoreSalesRange({ id: row.id, type: row.type, name: row.name, config: row.config || {}, secrets }, vaultSecretFor(tenantId), from, to);
+    for (const day of daily) {
+      await supabase.from('store_snapshots').upsert({ tenant_id: tenantId, connector_id: row.id, business_date: day.businessDate, captured_at: new Date().toISOString(), revenue: day.revenue, transactions: day.transactions, low_stock_count: 0, low_stock_items: [], source: { type: row.type, name: row.name }, partial: false }, { onConflict: 'tenant_id,business_date' });
+      void replicateSnapshotToCortex({ tenantId, connectorId: row.id, businessDate: day.businessDate, revenue: day.revenue, transactions: day.transactions, lowStockCount: 0, source: { type: row.type, name: row.name }, partial: false });
+    }
+    const totals = daily.reduce((sum, day) => ({ revenue: sum.revenue + day.revenue, transactions: sum.transactions + day.transactions }), { revenue: 0, transactions: 0 });
+    await auditLog({ tenantId, userId: auth?.userId, action: 'store.sales.read', resource: `connector:${row.id}`, detail: { from, to, days: daily.length, source: auth ? 'user' : 'shre-router' }, ip: getClientIp(req) });
+    json(res, 200, { store: row.name, from, to, daily, totals: { revenue: Math.round(totals.revenue * 100) / 100, transactions: totals.transactions, averageTicket: totals.transactions ? Math.round((totals.revenue / totals.transactions) * 100) / 100 : 0 }, source: 'RapidRMS API', fetchedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('[store-sales]', err instanceof Error ? err.message : err);
+    json(res, 502, { error: 'RapidRMS sales data could not be retrieved' });
+  }
+}
+
+const APP_CAPABILITY_BUNDLES: Record<string, { tools: string[]; skills: Array<{ name: string; capabilities: string[] }> }> = {
+  storepulse: {
+    tools: ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_item_search', 'mib_low_inventory'],
+    skills: [
+      { name: 'Daily Sales Summary', capabilities: ['pos.sales.read'] },
+      { name: 'Inventory Health', capabilities: ['pos.inventory.read'] },
+      { name: 'Store Performance', capabilities: ['stores.read', 'pos.sales.read'] },
+    ],
+  },
+  mib: { tools: ['mib_get_workspace', 'mib_list_agents', 'mib_list_tasks'], skills: [{ name: 'Workspace Operations', capabilities: ['workspace.admin'] }] },
+  centrix: { tools: ['centrix_search_contacts', 'centrix_list_contacts', 'centrix_list_tasks', 'centrix_list_deals'], skills: [{ name: 'Customer Operations', capabilities: ['crm.read', 'tasks.read'] }] },
+};
+
+const CONNECTOR_CAPABILITY_TOOLS: Record<string, string[]> = {
+  'rapidrms-api': ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_store_list', 'mib_item_search', 'mib_low_inventory', 'mib_invoices', 'rapidrms_storepulse'],
+  'verifone-commander': ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_store_list', 'mib_item_search', 'mib_low_inventory', 'mib_invoices'],
+};
+
+async function handleWorkspaceCapabilities(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const serviceToken = readServiceToken();
+  const presented = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const source = Array.isArray(req.headers['x-service-source']) ? req.headers['x-service-source'][0] : req.headers['x-service-source'];
+  const tenantId = getRequestUrl(req).searchParams.get('tenantId') || '';
+  if (!serviceToken || source !== 'shre-router' || !tokensMatch(presented, serviceToken) || !UUID_RE.test(tenantId)) return json(res, 401, { error: 'Authentication required' });
+  const supabase = createSupabaseAdmin();
+  const [{ data: grants, error: grantError }, { data: resources, error: resourceError }, { data: connectors, error: connectorError }] = await Promise.all([
+    supabase.from('marketplace_app_entitlements').select('app_key,status,service_config').eq('tenant_id', tenantId).eq('status', 'active'),
+    supabase.from('tenant_resources').select('kind,provider,name,status,capabilities,config,store_ids').eq('tenant_id', tenantId).eq('status', 'active'),
+    supabase.from('tenant_connectors').select('type,status').eq('tenant_id', tenantId).eq('status', 'connected'),
+  ]);
+  if (grantError || resourceError || connectorError) return json(res, 500, { error: grantError?.message || resourceError?.message || connectorError?.message });
+  const appKeys = (grants || []).map(grant => String(grant.app_key));
+  const connectorTypes = (connectors || []).map(connector => String(connector.type));
+  const tools = [...new Set([
+    ...appKeys.flatMap(appKey => APP_CAPABILITY_BUNDLES[appKey]?.tools || []),
+    ...connectorTypes.flatMap(type => CONNECTOR_CAPABILITY_TOOLS[type] || []),
+  ])];
+  await auditLog({ tenantId, action: 'workspace.capabilities.service_read', resource: tenantId, detail: { source, apps: appKeys.length, connectors: connectorTypes.length, tools: tools.length }, ip: getClientIp(req) });
+  json(res, 200, { tenantId, apps: grants || [], resources: resources || [], tools, generatedAt: new Date().toISOString() });
+}
+
+function routerModelId(provider: string, model: string): string {
+  if (model.includes('/')) return model;
+  if (provider === 'aum') return model === 'shre-70b' ? 'aum/70b' : `aum/${model}`;
+  const prefix = provider === 'google' ? 'google' : provider;
+  return `${prefix}/${model}`;
+}
+
+async function handleModelSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const supabase = createSupabaseAdmin();
+  if (req.method === 'GET') {
+    const { data, error } = await supabase.from('tenant_resources').select('id,provider,name,status,config,health').eq('tenant_id', auth.tenantId).eq('kind', 'model').order('created_at');
+    if (error) return json(res, 500, { error: error.message });
+    const providers = (data || []).map(row => ({ id: row.id, provider: row.provider, label: row.name, model: row.config?.modelId, endpoint: row.config?.endpoint, isActive: row.status === 'active', status: row.status, verification: row.health }));
+    return json(res, 200, { providers, active: providers.find(provider => provider.isActive)?.id || null });
+  }
+  if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
+  const body = await parseJsonBody(req);
+  if (!body || !Array.isArray(body.providers)) return json(res, 400, { error: 'providers are required' });
+  const selected = body.providers.find((provider: Record<string, unknown>) => String(provider.id) === String(body.active)) || body.providers.find((provider: Record<string, unknown>) => provider.isActive === true);
+  if (!selected) return json(res, 400, { error: 'Select an active model provider' });
+  const provider = String(selected.provider || '').toLowerCase();
+  const model = String(selected.model || '').trim();
+  if (!['aum', 'ollama', 'anthropic', 'openai', 'google'].includes(provider) || !model) return json(res, 400, { error: 'Unsupported provider or model' });
+  const modelId = routerModelId(provider, model);
+  const apiKey = typeof selected.apiKey === 'string' ? selected.apiKey.trim() : '';
+  const credentialMode = apiKey ? 'api_key' : 'system_provider';
+  const routerResponse = await fetch(`${SHRE_ROUTER_URL}/v1/model-onboarding/profile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: req.headers.authorization || '', 'x-tenant-id': auth.tenantId, 'x-user-id': auth.userId },
+    body: JSON.stringify({ tenantId: auth.tenantId, userId: auth.userId, agentId: 'aros-agent', modelId, credentialMode, apiKey: apiKey || undefined, autoUpgrade: true }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await routerResponse.json().catch(() => ({})) as Record<string, unknown>;
+  const verified = routerResponse.ok && (result.verification as Record<string, unknown> | undefined)?.verified !== false;
+  const { error } = await supabase.from('tenant_resources').upsert({
+    tenant_id: auth.tenantId, kind: 'model', provider, name: String(selected.label || model), status: verified ? 'active' : 'failed',
+    capabilities: ['chat.completions', 'tools'], config: { modelId, endpoint: selected.endpoint || null, credentialMode },
+    health: { state: verified ? 'verified' : 'failed', checkedAt: new Date().toISOString(), detail: verified ? 'Provider verified by MIB router' : String(result.error || 'Provider verification failed') }, created_by: auth.userId,
+  }, { onConflict: 'tenant_id,kind,name' });
+  if (error) return json(res, 500, { error: error.message });
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'model.provider.configured', resource: `model:${modelId}`, detail: { provider, modelId, credentialMode, verified }, ip: getClientIp(req) });
+  json(res, routerResponse.ok ? 200 : 409, verified ? { providers: [{ ...selected, apiKey: undefined, model: modelId, isActive: true }], active: selected.id, verification: result.verification } : { error: String(result.error || 'Model verification failed'), verification: result.verification });
+}
+
+const runningStoreSyncs = new Set<string>();
+const isoDate = (value: Date) => value.toISOString().slice(0, 10);
+const addDays = (value: string, days: number) => isoDate(new Date(Date.parse(`${value}T00:00:00Z`) + days * 86_400_000));
+
+async function runStoreSync(jobId: string): Promise<void> {
+  if (runningStoreSyncs.has(jobId)) return;
+  runningStoreSyncs.add(jobId);
+  const supabase = createSupabaseAdmin();
+  try {
+    const { data: job, error: jobError } = await supabase.from('store_sync_jobs').select('*').eq('id', jobId).single();
+    if (jobError || !job || job.status === 'cancelled' || job.status === 'completed') return;
+    const { data: row, error: connectorError } = await supabase.from('tenant_connectors').select(`${CONNECTOR_COLUMNS}, credentials_encrypted`).eq('id', job.connector_id).eq('tenant_id', job.tenant_id).eq('type', 'rapidrms-api').eq('status', 'connected').single();
+    if (connectorError || !row) throw new Error('The RapidRMS connector is no longer healthy');
+    await supabase.from('store_sync_jobs').update({ status: 'running', started_at: job.started_at || new Date().toISOString(), last_error: null, updated_at: new Date().toISOString() }).eq('id', jobId);
+    ensureConnectorCrypto();
+    const secrets = JSON.parse(decryptValue(row.credentials_encrypted)) as Record<string, string>;
+    const totalDays = Math.round((Date.parse(`${job.to_date}T00:00:00Z`) - Date.parse(`${job.from_date}T00:00:00Z`)) / 86_400_000) + 1;
+    let cursor = String(job.cursor_date);
+    let daysSynced = Number(job.days_synced || 0);
+    while (cursor <= job.to_date) {
+      const { data: current } = await supabase.from('store_sync_jobs').select('status').eq('id', jobId).single();
+      if (current?.status === 'cancelled') return;
+      const chunkTo = [addDays(cursor, Number(job.chunk_days) - 1), String(job.to_date)].sort()[0];
+      const daily = await fetchStoreSalesRange({ id: row.id, type: row.type, name: row.name, config: row.config || {}, secrets }, vaultSecretFor(job.tenant_id), cursor, chunkTo);
+      for (const day of daily) {
+        const snapshot = { tenant_id: job.tenant_id, connector_id: row.id, business_date: day.businessDate, captured_at: new Date().toISOString(), revenue: day.revenue, transactions: day.transactions, low_stock_count: 0, low_stock_items: [], source: { type: row.type, name: row.name }, partial: false };
+        const { error } = await supabase.from('store_snapshots').upsert(snapshot, { onConflict: 'tenant_id,business_date' });
+        if (error) throw error;
+        void replicateSnapshotToCortex({ tenantId: job.tenant_id, connectorId: row.id, businessDate: day.businessDate, revenue: day.revenue, transactions: day.transactions, lowStockCount: 0, source: snapshot.source, partial: false });
+      }
+      const chunkDays = Math.round((Date.parse(`${chunkTo}T00:00:00Z`) - Date.parse(`${cursor}T00:00:00Z`)) / 86_400_000) + 1;
+      daysSynced += chunkDays;
+      cursor = addDays(chunkTo, 1);
+      await supabase.from('store_sync_jobs').update({ cursor_date: cursor, days_synced: daysSynced, progress: Math.min(99, Math.round(daysSynced / totalDays * 100)), updated_at: new Date().toISOString() }).eq('id', jobId);
+    }
+    await supabase.from('store_sync_jobs').update({ status: 'completed', progress: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', jobId);
+    storeSummaryCache.delete(job.tenant_id);
+  } catch (err) {
+    await supabase.from('store_sync_jobs').update({ status: 'failed', last_error: err instanceof Error ? err.message.slice(0, 500) : 'Historical sync failed', updated_at: new Date().toISOString() }).eq('id', jobId);
+    console.error('[store-sync]', jobId, err instanceof Error ? err.message : err);
+  } finally {
+    runningStoreSyncs.delete(jobId);
+  }
+}
+
+async function handleStoreSync(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const supabase = createSupabaseAdmin();
+  if (req.method === 'GET') {
+    const { data, error } = await supabase.from('store_sync_jobs').select('id,connector_id,from_date,to_date,cursor_date,chunk_days,status,progress,days_synced,last_error,started_at,completed_at,created_at,updated_at').eq('tenant_id', auth.tenantId).order('created_at', { ascending: false }).limit(20);
+    if (error) return json(res, 500, { error: error.message });
+    const jobs = await Promise.all((data || []).map(async job => {
+      const { count } = await supabase.from('store_snapshots').select('business_date', { count: 'exact', head: true }).eq('tenant_id', auth.tenantId).eq('connector_id', job.connector_id).gte('business_date', job.from_date).lte('business_date', job.to_date);
+      return { ...job, rows_imported: count || 0 };
+    }));
+    return json(res, 200, { jobs });
+  }
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+  const body = await parseJsonBody(req);
+  if (!body) return json(res, 400, { error: 'Invalid JSON' });
+  const months = Math.max(1, Math.min(36, Number(body.months || 12)));
+  const to = typeof body.to === 'string' ? body.to : businessDate();
+  const defaultFrom = new Date(`${to}T00:00:00Z`); defaultFrom.setUTCMonth(defaultFrom.getUTCMonth() - months);
+  const from = typeof body.from === 'string' ? body.from : isoDate(defaultFrom);
+  const chunkDays = Math.max(1, Math.min(31, Number(body.chunkDays || 7)));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to) return json(res, 400, { error: 'Invalid historical date range' });
+  const { data: connector } = await supabase.from('tenant_connectors').select('id').eq('tenant_id', auth.tenantId).eq('type', 'rapidrms-api').eq('status', 'connected').limit(1).maybeSingle();
+  if (!connector) return json(res, 409, { error: 'Connect and test a RapidRMS store before starting history sync' });
+  const { data: existing } = await supabase.from('store_sync_jobs').select('id,status').eq('tenant_id', auth.tenantId).in('status', ['queued','running']).limit(1).maybeSingle();
+  if (existing) return json(res, 409, { error: 'A historical sync is already active', job: existing });
+  const { data: job, error } = await supabase.from('store_sync_jobs').insert({ tenant_id: auth.tenantId, connector_id: connector.id, from_date: from, to_date: to, cursor_date: from, chunk_days: chunkDays }).select('*').single();
+  if (error || !job) return json(res, 500, { error: error?.message || 'Could not create sync job' });
+  void runStoreSync(job.id);
+  json(res, 202, { job });
+}
+
 function validateConnectorInput(
   type: StoreConnectorType,
   config: Record<string, unknown>,
@@ -2144,23 +2355,6 @@ async function handleConnectorsCreate(req: IncomingMessage, res: ServerResponse)
 
     if (error) throw error;
 
-    let store: { id: string; name: string } | null = null;
-    let edgeActivation: { activationCode: string; expiresAt: string; storeId: string } | null = null;
-    if (type === 'verifone-commander') {
-      const storeName = typeof config.storeName === 'string' && config.storeName.trim() ? config.storeName.trim() : name;
-      const storeNumber = typeof config.storeNumber === 'string' ? config.storeNumber.trim() : '';
-      const slugPart = (storeNumber || storeName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42) || data.id.slice(0, 8);
-      const { data: storeRow, error: storeError } = await supabase.from('stores').upsert({
-        tenant_id: auth.tenantId, name: storeName, slug: `verifone-${slugPart}`,
-        pos_provider: 'verifone-commander', pos_external_id: data.id,
-        metadata: { tenantConnectorId: data.id, storeNumber: storeNumber || null }, updated_at: new Date().toISOString(),
-      }, { onConflict: 'tenant_id,slug' }).select('id,name').single();
-      if (storeError) throw new Error(`Store mapping failed: ${storeError.message}`);
-      store = storeRow;
-      const activation = await new EdgeProvisioningService(new SupabaseEdgeProvisioningRepository(supabase)).createActivationCode(auth, { storeId: storeRow.id, expiresInMinutes: 60 });
-      edgeActivation = { activationCode: activation.activationCode, expiresAt: activation.expiresAt, storeId: storeRow.id };
-    }
-
     await auditLog({
       tenantId: auth.tenantId,
       userId: auth.userId,
@@ -2170,86 +2364,12 @@ async function handleConnectorsCreate(req: IncomingMessage, res: ServerResponse)
       ip: getClientIp(req),
     });
 
-    json(res, 200, { ok: true, connector: data, store, edgeActivation });
+    json(res, 200, { ok: true, connector: data });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save connector';
     console.error('[connectors.create]', message);
     json(res, 500, { error: message });
   }
-}
-
-type DiscoveredProviderStore = {
-  providerStoreId: string;
-  providerDbName?: string;
-  name?: string;
-};
-
-/**
- * Materialize provider identities as canonical AROS stores and bind them to
- * the connector. This is the hand-off point shared by AROS, MIB, StorePulse,
- * HQ, and CPG: downstream products use tenant_id + store_id, never a provider
- * client id as their authorization boundary.
- */
-async function provisionCanonicalStores(input: {
-  tenantId: string;
-  connectorId: string;
-  connectorType: StoreConnectorType;
-  connectorName: string;
-  config: Record<string, any>;
-  discoveredStores?: DiscoveredProviderStore[];
-}): Promise<Array<{ storeId: string; providerStoreId: string }>> {
-  const supabase = createSupabaseAdmin();
-  let discovered = input.discoveredStores ?? [];
-
-  if (!discovered.length && input.connectorType === 'azure-db') {
-    discovered = [{
-      providerStoreId: String(input.config.database || input.connectorId),
-      providerDbName: String(input.config.database || ''),
-      name: input.connectorName,
-    }];
-  }
-  if (!discovered.length && input.connectorType === 'verifone-commander') {
-    discovered = [{
-      providerStoreId: String(input.config.storeNumber || input.connectorId),
-      name: String(input.config.storeName || input.connectorName),
-    }];
-  }
-
-  const provisioned: Array<{ storeId: string; providerStoreId: string }> = [];
-  for (const providerStore of discovered) {
-    const slugPart = providerStore.providerStoreId
-      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42)
-      || input.connectorId.slice(0, 8);
-    const slug = `${input.connectorType}-${slugPart}`;
-    const { data: store, error: storeError } = await supabase.from('stores').upsert({
-      tenant_id: input.tenantId,
-      name: providerStore.name?.trim() || input.connectorName,
-      slug,
-      pos_provider: input.connectorType,
-      pos_client_id: providerStore.providerStoreId,
-      pos_db_name: providerStore.providerDbName || null,
-      pos_external_id: providerStore.providerStoreId,
-      status: 'active',
-      metadata: { tenantConnectorId: input.connectorId },
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'tenant_id,slug' }).select('id').single();
-    if (storeError || !store) throw new Error(`Canonical store provisioning failed: ${storeError?.message || 'missing store'}`);
-
-    const { error: bindingError } = await supabase.from('store_connector_bindings').upsert({
-      tenant_id: input.tenantId,
-      store_id: store.id,
-      connector_id: input.connectorId,
-      provider: input.connectorType,
-      provider_store_id: providerStore.providerStoreId,
-      provider_db_name: providerStore.providerDbName || null,
-      status: 'syncing',
-      metadata: {},
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'tenant_id,connector_id,provider_store_id' });
-    if (bindingError) throw new Error(`Store binding failed: ${bindingError.message}`);
-    provisioned.push({ storeId: store.id, providerStoreId: providerStore.providerStoreId });
-  }
-  return provisioned;
 }
 
 async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2328,25 +2448,11 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
       })
       .eq('id', row.id);
 
-    const provisioning = result.success
-      ? await applyProvisioning({ tenantId: auth.tenantId, sourceKind: 'connector', sourceId: row.id, sourceKey: row.type, activate: true, actor: auth.userId })
-      : { applied: false };
-    const canonicalStores = result.success
-      ? await provisionCanonicalStores({
-          tenantId: auth.tenantId,
-          connectorId: row.id,
-          connectorType: row.type as StoreConnectorType,
-          connectorName: row.name,
-          config,
-          discoveredStores: result.discoveredStores,
-        })
-      : [];
-
     // A newly-connected (or newly-broken) connector should reflect on the
     // dashboard immediately, not after the summary TTL expires.
     storeSummaryCache.delete(auth.tenantId);
 
-    json(res, 200, { ok: true, result, provisioning, canonicalStores });
+    json(res, 200, { ok: true, result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Connection test failed';
     console.error('[connectors.test]', message);
@@ -2355,128 +2461,6 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
     // Never leave test credentials in the in-memory vault.
     await Promise.all(refs.map((ref) => deleteCredential(ref).catch(() => {})));
   }
-}
-
-const APP_LAUNCH_URLS: Record<string, string> = {
-  storepulse: process.env.STOREPULSE_URL || 'https://storepulse.aros.live',
-  'storepulse-hq': process.env.STOREPULSE_HQ_URL || 'https://storepulse-hq.aros.live',
-  cpg: process.env.CPG_URL || 'https://cpg.aros.live',
-  mib: process.env.MIB_URL || 'https://mib.aros.live',
-};
-
-function base64UrlJson(value: unknown): string {
-  return Buffer.from(JSON.stringify(value)).toString('base64url');
-}
-
-/** Mint a five-minute, audience-bound launch token for an authorized product. */
-async function handleAppLaunch(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await parseJsonBody(req);
-  let auth = await authenticateRequest(req);
-  const presentedToken = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-  const serviceSource = String(req.headers['x-service-source'] || '');
-  if (!auth && serviceSource === 'mib007' && tokensMatch(presentedToken, readServiceToken())) {
-    const tenantId = typeof body?.tenantId === 'string' ? body.tenantId : '';
-    const userId = typeof body?.userId === 'string' ? body.userId : '';
-    if (!UUID_RE.test(tenantId) || !userId) return json(res, 400, { error: 'Valid tenantId and userId required' });
-    auth = { tenantId, userId, role: typeof body?.role === 'string' ? body.role : 'member' };
-  }
-  if (!auth) return json(res, 401, { error: 'Authentication required' });
-  const app = body && typeof body.app === 'string' ? body.app : '';
-  if (!APP_LAUNCH_URLS[app]) return json(res, 400, { error: 'Unsupported app' });
-
-  const signingSecret = process.env.AROS_LAUNCH_TOKEN_SECRET || process.env.AROS_ENCRYPTION_KEY;
-  if (!signingSecret) return json(res, 503, { error: 'App launch signing is not configured' });
-
-  const supabase = createSupabaseAdmin();
-  const { data: stores, error } = await supabase
-    .from('stores').select('id').eq('tenant_id', auth.tenantId).eq('status', 'active');
-  if (error) return json(res, 500, { error: 'Unable to resolve authorized stores' });
-  const allowed = new Set((stores ?? []).map((store) => String(store.id)));
-  const requested = Array.isArray(body?.storeIds) ? body.storeIds.map(String) : [];
-  if (requested.some((storeId) => !allowed.has(storeId))) {
-    return json(res, 403, { error: 'Requested store is outside this tenant' });
-  }
-  const storeIds = requested.length ? requested : [...allowed];
-  const { data: bindings, error: bindingError } = await supabase
-    .from('store_connector_bindings')
-    .select('store_id,provider,provider_store_id,provider_db_name,status')
-    .eq('tenant_id', auth.tenantId)
-    .in('store_id', storeIds)
-    .in('status', ['syncing', 'ready']);
-  if (bindingError) return json(res, 500, { error: 'Unable to resolve store bindings' });
-  const now = Math.floor(Date.now() / 1000);
-  const header = base64UrlJson({ alg: 'HS256', typ: 'JWT' });
-  const payload = base64UrlJson({
-    iss: 'aros', aud: app, sub: auth.userId, tenant_id: auth.tenantId,
-    store_ids: storeIds,
-    store_bindings: (bindings ?? []).map((binding) => ({
-      store_id: binding.store_id,
-      provider: binding.provider,
-      provider_store_id: binding.provider_store_id,
-      provider_db_name: binding.provider_db_name,
-    })),
-    role: auth.role, iat: now, exp: now + 300,
-    jti: randomBytes(16).toString('hex'),
-  });
-  const signature = createHmac('sha256', signingSecret).update(`${header}.${payload}`).digest('base64url');
-  const token = `${header}.${payload}.${signature}`;
-  const launchUrl = `${APP_LAUNCH_URLS[app].replace(/\/$/, '')}/#launch_token=${encodeURIComponent(token)}`;
-
-  await auditLog({
-    tenantId: auth.tenantId, userId: auth.userId, action: 'app.launched', resource: app,
-    detail: { storeIds, source: serviceSource || 'user' }, ip: getClientIp(req),
-  });
-  json(res, 200, { app, launchUrl, expiresAt: new Date((now + 300) * 1000).toISOString() });
-}
-
-async function handleModelRouting(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const auth = await authenticateRequest(req);
-  if (!auth) return json(res, 401, { error: 'Authentication required' });
-  try {
-    const response = await fetch(`${SHRE_ROUTER_URL}/v1/models`, { signal: AbortSignal.timeout(8_000) });
-    if (!response.ok) throw new Error(`Model gateway returned HTTP ${response.status}`);
-    const payload = await response.json() as { models?: Array<Record<string, unknown>>; data?: Array<Record<string, unknown>> };
-    const source = Array.isArray(payload.models) && payload.models.length ? payload.models : Array.isArray(payload.data) ? payload.data : [];
-    const availableModels = source.filter(item => item.connected !== false).map(item => ({
-      id: String(item.id || ''), name: String(item.name || item.id || ''), provider: String(item.provider || item.owned_by || String(item.id || '').split('/')[0] || 'unknown'),
-      connected: item.connected !== false, status: item.connected === false ? 'unavailable' : 'available', note: typeof item.note === 'string' ? item.note : undefined,
-    })).filter(item => item.id && item.name);
-    json(res, 200, { defaultModel: 'auto', availableModels });
-  } catch (error) {
-    json(res, 502, { error: error instanceof Error ? error.message : 'Model gateway unavailable' });
-  }
-}
-
-async function handleConnectorsUpdate(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const auth = await authenticateRequest(req);
-  if (!auth) return json(res, 401, { error: 'Authentication required' });
-  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
-  const body = await parseJsonBody(req);
-  const id = body && typeof body.id === 'string' ? body.id : '';
-  const name = body && typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
-  const description = body && typeof body.description === 'string' ? body.description.trim().slice(0, 500) : '';
-  const accessMode = body?.accessMode === 'read_write' ? 'read_write' : 'read';
-  if (!id || !name) return json(res, 400, { error: 'Connector id and title are required' });
-  const supabase = createSupabaseAdmin();
-  const { data: current } = await supabase.from('tenant_connectors').select('config, credentials_encrypted').eq('tenant_id', auth.tenantId).eq('id', id).single();
-  if (!current) return json(res, 404, { error: 'Connector not found' });
-  const configUpdates = isRecord(body?.config) ? body.config : {};
-  const secretUpdates = isRecord(body?.secrets) ? Object.fromEntries(Object.entries(body.secrets).filter(([, value]) => typeof value === 'string' && value.trim())) : {};
-  const currentConfig = isRecord(current.config) ? current.config : {};
-  const configChanged = Object.entries(configUpdates).some(([key, value]) => currentConfig[key] !== value);
-  const config = { ...currentConfig, ...configUpdates, description, accessMode };
-  const update: Record<string, unknown> = { name, config, last_error: null, updated_at: new Date().toISOString() };
-  if (Object.keys(secretUpdates).length || configChanged) update.status = 'pending';
-  if (Object.keys(secretUpdates).length) {
-    ensureConnectorCrypto();
-    const existing = JSON.parse(decryptValue(current.credentials_encrypted)) as Record<string, string>;
-    update.credentials_encrypted = encryptValue(JSON.stringify({ ...existing, ...secretUpdates }));
-  }
-  const { data, error } = await supabase.from('tenant_connectors').update(update).eq('tenant_id', auth.tenantId).eq('id', id).select(CONNECTOR_COLUMNS).single();
-  if (error) return json(res, error.code === '23505' ? 409 : 500, { error: error.code === '23505' ? 'A connection with this title already exists.' : error.message });
-  storeSummaryCache.delete(auth.tenantId);
-  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'connector.updated', resource: id, detail: { accessMode, credentialsChanged: Object.keys(secretUpdates), configChanged: Object.keys(configUpdates) }, ip: getClientIp(req) });
-  json(res, 200, { connector: data });
 }
 
 async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2489,9 +2473,6 @@ async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse)
 
   try {
     const supabase = createSupabaseAdmin();
-    const { data: connector } = await supabase.from('tenant_connectors').select('id,type').eq('tenant_id', auth.tenantId).eq('id', id).single();
-    if (!connector) return json(res, 404, { error: 'Connector not found' });
-    const provisioning = await applyProvisioning({ tenantId: auth.tenantId, sourceKind: 'connector', sourceId: connector.id, sourceKey: connector.type, activate: false, actor: auth.userId });
     const { error } = await supabase
       .from('tenant_connectors')
       .delete()
@@ -2511,7 +2492,7 @@ async function handleConnectorsDelete(req: IncomingMessage, res: ServerResponse)
       ip: getClientIp(req),
     });
 
-    json(res, 200, { ok: true, provisioning });
+    json(res, 200, { ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to remove connector';
     console.error('[connectors.delete]', message);
@@ -2725,26 +2706,10 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return;
   }
 
-  if (pathname === '/auth/oidc/start' && method === 'GET') {
-    try {
-      const result = await oidcRp.begin({ cookie: req.headers.cookie, returnTo: requestUrl.searchParams.get('returnTo') || undefined, workspaceId: requestUrl.searchParams.get('workspaceId') || undefined });
-      res.writeHead(302, { Location: result.location, 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return;
-    } catch { return json(res, 503, { error: 'Identity service unavailable' }); }
-  }
-  if (pathname === '/auth/callback' && method === 'GET') {
-    try {
-      const result = await oidcRp.callback({ code: requestUrl.searchParams.get('code') || undefined, state: requestUrl.searchParams.get('state') || undefined, cookie: req.headers.cookie });
-      res.writeHead(302, { Location: result.location, 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return;
-    } catch { return json(res, 401, { error: 'OIDC authorization failed' }); }
-  }
-  if (pathname === '/auth/session' && method === 'GET') {
-    const session = await oidcRp.authenticate(req.headers.cookie);
-    return session ? json(res, 200, { authenticated: true, subject: session.subject, workspaceId: session.workspaceId, role: session.role }) : json(res, 401, { authenticated: false });
-  }
-  if (pathname === '/auth/logout' && method === 'POST') {
-    const result = await oidcRp.logout(req.headers.cookie);
-    res.writeHead(204, { 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return;
-  }
+  if (pathname === '/auth/oidc/start' && method === 'GET') { try { const result = await oidcRp.begin({ cookie: req.headers.cookie, returnTo: requestUrl.searchParams.get('returnTo') || undefined, workspaceId: requestUrl.searchParams.get('workspaceId') || undefined }); res.writeHead(302, { Location: result.location, 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return; } catch { return json(res, 503, { error: 'Identity service unavailable' }); } }
+  if (pathname === '/auth/callback' && method === 'GET') { try { const result = await oidcRp.callback({ code: requestUrl.searchParams.get('code') || undefined, state: requestUrl.searchParams.get('state') || undefined, cookie: req.headers.cookie }); res.writeHead(302, { Location: result.location, 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return; } catch { return json(res, 401, { error: 'OIDC authorization failed' }); } }
+  if (pathname === '/auth/session' && method === 'GET') { const session = await oidcRp.authenticate(req.headers.cookie); return session ? json(res, 200, { authenticated: true, subject: session.subject, workspaceId: session.workspaceId, role: session.role }) : json(res, 401, { authenticated: false }); }
+  if (pathname === '/auth/logout' && method === 'POST') { const result = await oidcRp.logout(req.headers.cookie); res.writeHead(204, { 'Set-Cookie': result.setCookie, 'Cache-Control': 'no-store' }); res.end(); return; }
 
   // ── Trace Middleware (SDK detects Express by 3 args: req, res, next) ──
   try { traceMiddleware(req, res, () => {}); } catch { /* non-fatal */ }
@@ -2930,15 +2895,8 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return handleConnectorsTest(req, res);
   }
 
-  if (pathname === '/api/connectors' && method === 'PATCH') {
-    return handleConnectorsUpdate(req, res);
-  }
-
   if (pathname === '/api/connectors' && method === 'DELETE') {
     return handleConnectorsDelete(req, res);
-  }
-  if (pathname === '/api/provisioning/reconcile' && method === 'POST') {
-    return handleProvisioningReconcile(req, res);
   }
 
   // Live store data read-back — consumed by the dashboard and by the agent's
@@ -2946,8 +2904,17 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname === '/api/store/summary' && method === 'GET') {
     return handleStoreSummary(req, res);
   }
-  if (pathname === '/api/gateway/model-routing' && method === 'GET') {
-    return handleModelRouting(req, res);
+  if (pathname === '/api/store/sales' && method === 'GET') {
+    return handleStoreSales(req, res);
+  }
+  if (pathname === '/api/workspace/capabilities' && method === 'GET') {
+    return handleWorkspaceCapabilities(req, res);
+  }
+  if (pathname === '/api/settings/models' && (method === 'GET' || method === 'POST')) {
+    return handleModelSettings(req, res);
+  }
+  if (pathname === '/api/store/sync' && (method === 'GET' || method === 'POST')) {
+    return handleStoreSync(req, res);
   }
 
   if (pathname === '/api/marketplace/entitlements' && method === 'GET') {
@@ -2977,7 +2944,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   const workspaceRolesMatch = pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)\/roles$/);
   if (workspaceRolesMatch && method === 'GET') return handleWorkspaceMembersCompat(req, res, workspaceRolesMatch[1]);
   if (pathname === '/api/apps' && method === 'GET') return handlePlatformApps(req, res);
-  if (pathname === '/api/apps/launch' && method === 'POST') return handleAppLaunch(req, res);
+  if (pathname === '/api/app-launch/consume' && method === 'POST') {
+    if (!rateLimit(req, 30, 60_000)) return json(res, 429, { error: 'Too many launch attempts' });
+    return handleAppLaunchConsume(req, res);
+  }
+  const appLaunchMatch = pathname.match(/^\/api\/apps\/([a-z0-9-]+)\/launch$/);
+  if (appLaunchMatch && method === 'POST') return handleAppLaunchCreate(req, res, appLaunchMatch[1]);
   const appGrantMatch = pathname.match(/^\/api\/apps\/([a-z0-9-]+)\/grant$/);
   if (appGrantMatch && method === 'POST') return handlePlatformApps(req, res, appGrantMatch[1]);
 
@@ -3027,6 +2999,15 @@ const server = createServer((req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[aros-platform] Health server listening on 0.0.0.0:${PORT}`);
   heartbeat.start();
+
+  // Resume interrupted historical imports after a deploy or process restart.
+  setTimeout(() => {
+    createSupabaseAdmin().from('store_sync_jobs').select('id').in('status', ['queued', 'running'])
+      .then(({ data, error }) => {
+        if (error) return console.error('[store-sync] resume query:', error.message);
+        for (const job of data || []) void runStoreSync(job.id);
+      });
+  }, 15_000).unref();
 
   // Warehouse snapshotter — env-gated (STORE_SNAPSHOT_INTERVAL_MIN>0 to enable).
   // Off by default: no env, no background work.

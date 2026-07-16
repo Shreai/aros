@@ -3,7 +3,7 @@ import { useArosTheme } from '../lib/useArosTheme';
 import { ConciergeChat } from './ConciergeChat';
 import { SectionPanel } from './SectionPanel';
 import { IntelligencePage } from './pages/intelligence';
-import { StoresPage, MarketplacePage, AppsPage, ConnectorsPage, PluginsPage } from './pages/connections';
+import { StoresPage, AppsPage } from './pages/connections';
 import {
   BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage,
 } from './pages/admin';
@@ -24,14 +24,14 @@ const MenuIcon = () => (<svg width="18" height="18" viewBox="0 0 24 24" fill="no
 const PlusIcon = () => (<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>);
 
 const PATH_TO_SECTION: Record<string, Exclude<SectionKey, 'chat'>> = {
-  '/stores': 'stores', '/marketplace': 'marketplace', '/apps': 'apps', '/connectors': 'connectors', '/plugins': 'plugins', '/skills': 'skills', '/agents': 'agents',
+  '/stores': 'stores', '/apps': 'apps', '/skills': 'skills', '/agents': 'agents',
   '/models': 'models', '/connection-health': 'health', '/settings': 'settings',
   '/permissions': 'permissions',
   '/profile': 'settings', '/billing': 'billing', '/costs': 'usage', '/users': 'team',
-  '/workspace': 'settings', '/channels': 'connectors',
+  '/workspace': 'settings', '/marketplace': 'apps', '/channels': 'apps',
 };
 const SECTION_TO_PATH: Partial<Record<SectionKey, string>> = {
-  stores: '/stores', marketplace: '/marketplace', apps: '/apps', connectors: '/connectors', plugins: '/plugins', skills: '/skills', agents: '/agents',
+  stores: '/stores', apps: '/apps', skills: '/skills', agents: '/agents',
   models: '/models', health: '/connection-health', settings: '/settings',
   billing: '/billing', usage: '/costs', team: '/users', permissions: '/permissions',
 };
@@ -79,7 +79,6 @@ export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [storesVersion, setStoresVersion] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
   const [seed, setSeed] = useState('');
@@ -132,19 +131,11 @@ export function AppShell() {
     if (key === 'chat') { navigate('chat'); return; }
     navigate('app', key);
   };
-  const goMarketplace = (tab: 'apps' | 'connectors' | 'plugins' | 'skills' | 'agents') => {
-    const path = `/marketplace?tab=${tab}`;
-    window.history.pushState({}, '', path);
-    setSection('marketplace'); setMode('app'); setMenuOpen(false); setProfileOpen(false);
-  };
   const title = mode === 'chat' ? 'Concierge' : mode === 'home' ? 'Home' : SECTION_TITLES[section];
   const renderSection = () => {
     if (demo) return <SectionPanel section={section} onConnect={openWizard} />;
-    if (section === 'stores') return <StoresPage key={storesVersion} onConnect={openWizard} />;
-    if (section === 'marketplace') return <MarketplacePage />;
-    if (section === 'apps') return <AppsPage onBrowse={() => goMarketplace('apps')} />;
-    if (section === 'connectors') return <ConnectorsPage onBrowse={() => goMarketplace('connectors')} />;
-    if (section === 'plugins') return <PluginsPage onBrowse={() => goMarketplace('plugins')} />;
+    if (section === 'stores') return <StoresPage onConnect={openWizard} />;
+    if (section === 'apps') return <AppsPage />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
     if (section === 'team') return <TeamPage />;
@@ -153,7 +144,7 @@ export function AppShell() {
     if (section === 'settings') return <SettingsPage />;
     if (section === 'skills' || section === 'agents' || section === 'models') {
       const kind = section === 'skills' ? 'skill' : section === 'agents' ? 'agent' : 'model';
-      return <IntelligencePage kind={kind} onBrowse={section === 'models' ? undefined : () => goMarketplace(section === 'skills' ? 'skills' : 'agents')} />;
+      return <IntelligencePage kind={kind} />;
     }
     return <SectionPanel section={section} onConnect={openWizard} />;
   };
@@ -182,7 +173,7 @@ export function AppShell() {
               <div className="rsx2-model"><span className="rsx2-model__btn">Shre · Local</span></div>
               <button className="rsx2-chatpane__new" onClick={newChat}><PlusIcon /> New chat</button>
             </div>
-            <ConciergeChat key={chatKey} onConnect={openWizard} onConnectApps={() => goSection('marketplace')} seed={seed} focusOnMount initial={recalled ?? undefined} onCanvasItems={onCanvasItems} />
+            <ConciergeChat key={chatKey} onConnect={openWizard} onConnectApps={() => goSection('apps')} seed={seed} focusOnMount initial={recalled ?? undefined} onCanvasItems={onCanvasItems} />
           </aside>
           <div className="rsx2-canvaswrap">
             <div className="rsx2-tabs">
@@ -271,7 +262,7 @@ export function AppShell() {
       )}
 
       {wizardOpen && (
-        <ConnectWizard onClose={() => setWizardOpen(false)} onDone={result => { setWizardOpen(false); setStoresVersion(v => v + 1); setToast(result.connected ? `${result.name} connected successfully.` : `${result.name} saved. Install and pair AROS Edge to finish connecting.`); }} />
+        <ConnectWizard onClose={() => setWizardOpen(false)} onDone={name => { setWizardOpen(false); setToast(`${name} connected — discovering stores…`); }} />
       )}
       {toast && <div className="rsx-toast">✓ {toast}</div>}
     </div>

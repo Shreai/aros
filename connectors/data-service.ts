@@ -10,6 +10,7 @@
 // fabricated numbers. We never guess a value we can't read confidently.
 
 import * as rapidRms from './rapidrms-api.js';
+import type { RapidRmsSession } from './types.js';
 import { setTenantSecret, storeCredential, deleteCredential } from './vault-ref.js';
 
 export interface StoreSummary {
@@ -39,10 +40,16 @@ export interface ConnectorRecord {
 
 function toRows(payload: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(payload)) return payload as Array<Record<string, unknown>>;
+  if (typeof payload === 'string') {
+    const text = payload.trim();
+    if (!text) return [];
+    try { return toRows(JSON.parse(text)); } catch { return []; }
+  }
   if (payload && typeof payload === 'object') {
     const obj = payload as Record<string, unknown>;
     for (const key of ['data', 'Data', 'Rows', 'rows', 'Result', 'result', 'Items', 'items', 'value']) {
-      if (Array.isArray(obj[key])) return obj[key] as Array<Record<string, unknown>>;
+      const rows = toRows(obj[key]);
+      if (rows.length > 0) return rows;
     }
   }
   return [];
@@ -71,8 +78,9 @@ function pickStr(row: Record<string, unknown>, names: string[]): string | null {
 // defensive design means an unrecognized shape yields an empty (partial)
 // section, never a wrong number — safe to ship, refine once a real tenant
 // connects.
-const REVENUE_FIELDS = ['Total', 'NetSales', 'NetTotal', 'GrandTotal', 'SalesAmount', 'Amount', 'TotalAmount'];
-const TXN_COUNT_FIELDS = ['TransactionCount', 'Transactions', 'Count', 'InvoiceCount', 'Receipts'];
+const REVENUE_FIELDS = ['Total', 'NetSales', 'NetTotal', 'GrandTotal', 'SalesAmount', 'Amount', 'TotalAmount', 'BillAmount', 'billAmount', 'subTotal', 'grandTotal', 'bill_amount'];
+const SALES_DATE_FIELDS = ['InvoiceDate', 'invoiceDate', 'invoice_date', 'CreatedDate', 'createdDate', 'BusinessDate', 'business_date', 'datetime', 'Date', 'date'];
+const INVOICE_FIELDS = ['InvoiceNo', 'invoiceNo', 'invoice_no', 'InvoiceNumber', 'TransactionId', 'transaction_id'];
 const QTY_FIELDS = ['OnHand', 'QtyOnHand', 'Quantity', 'Qty', 'StockOnHand', 'CurrentStock'];
 const REORDER_FIELDS = ['ReorderPoint', 'ReorderLevel', 'MinQty', 'MinimumQty', 'Threshold', 'ParLevel'];
 const NAME_FIELDS = ['Name', 'ItemName', 'Description', 'ProductName', 'Product'];
@@ -83,7 +91,42 @@ function todayRange(): { from: string; to: string } {
   const m = String(now.getUTCMonth() + 1).padStart(2, '0');
   const d = String(now.getUTCDate()).padStart(2, '0');
   const day = `${y}-${m}-${d}`;
-  return { from: `${day}T00:00:00`, to: `${day}T23:59:59` };
+  return { from: day, to: day };
+}
+
+function normalizeBusinessDate(value: string | null): string | null {
+  if (!value) return null;
+  const iso = value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+  if (iso) return iso;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : null;
+}
+
+const INVOICE_PAGE_SIZE = 5000;
+const MAX_INVOICE_PAGES = 200;
+
+/** Fetch every page for a bounded invoice-report range without silently truncating sales. */
+async function fetchInvoiceRows(
+  session: RapidRmsSession,
+  params: Record<string, unknown>,
+): Promise<Array<Record<string, unknown>>> {
+  const allRows: Array<Record<string, unknown>> = [];
+  let previousPageSignature = '';
+  for (let pageNo = 1; pageNo <= MAX_INVOICE_PAGES; pageNo++) {
+    const payload = await rapidRms.getInvoiceReport(session, { ...params, pageNo, pageSize: INVOICE_PAGE_SIZE });
+    const rows = toRows(payload);
+    if (rows.length === 0) return allRows;
+    const firstInvoice = pickStr(rows[0], INVOICE_FIELDS) || '';
+    const lastInvoice = pickStr(rows[rows.length - 1], INVOICE_FIELDS) || '';
+    const signature = `${rows.length}:${firstInvoice}:${lastInvoice}`;
+    if (pageNo > 1 && signature === previousPageSignature) {
+      throw new Error('RapidRMS invoice pagination did not advance');
+    }
+    allRows.push(...rows);
+    if (rows.length < INVOICE_PAGE_SIZE) return allRows;
+    previousPageSignature = signature;
+  }
+  throw new Error(`RapidRMS invoice report exceeded ${MAX_INVOICE_PAGES} pages`);
 }
 
 // ── RapidRMS summary ────────────────────────────────────────────
@@ -116,18 +159,14 @@ async function fetchRapidRmsSummary(
     let revenue = 0;
     let transactions = 0;
     try {
-      const salesRaw = await rapidRms.getSalesDetail(session, {
-        FromDate: from, ToDate: to, StartDate: from, EndDate: to,
-      });
-      const rows = toRows(salesRaw);
+      const rows = await fetchInvoiceRows(session, { FromDate: from, ToDate: to });
       let sawRevenue = false;
       for (const r of rows) {
         const rev = pickNum(r, REVENUE_FIELDS);
         if (rev !== null) { revenue += rev; sawRevenue = true; }
       }
       // Prefer an explicit count field on the envelope/first row; else row count.
-      const envelope = (salesRaw && typeof salesRaw === 'object' ? salesRaw : {}) as Record<string, unknown>;
-      transactions = pickNum(envelope, TXN_COUNT_FIELDS) ?? rows.length;
+      transactions = rows.length;
       if (!sawRevenue && rows.length > 0) partial = true; // rows existed but no revenue field matched
     } catch {
       partial = true;
@@ -184,5 +223,46 @@ export async function fetchStoreSummary(
     case 'verifone-commander':
     default:
       return null;
+  }
+}
+
+export type DailyStoreSales = { businessDate: string; revenue: number; transactions: number };
+
+/** Fetch and normalize a bounded RapidRMS sales range into daily totals. */
+export async function fetchStoreSalesRange(
+  record: ConnectorRecord,
+  vaultSecret: string,
+  from: string,
+  to: string,
+): Promise<DailyStoreSales[]> {
+  if (record.type !== 'rapidrms-api') return [];
+  const refs: string[] = [];
+  try {
+    setTenantSecret(vaultSecret);
+    const emailRef = await storeCredential(`${record.id}:sales-email`, record.secrets.email ?? '');
+    const passwordRef = await storeCredential(`${record.id}:sales-password`, record.secrets.password ?? '');
+    refs.push(emailRef, passwordRef);
+    const session = await rapidRms.authenticate({ baseUrl: String(record.config.baseUrl || 'https://rapidrmsapi.azurewebsites.net'), clientId: String(record.config.clientId || ''), sessionTimeout: Number(record.config.sessionTimeout) || 420 }, emailRef, passwordRef);
+    // Match MIB's proven RapidRMS contract: InvoiceReport expects calendar
+    // dates here, not timestamps with appended time components.
+    const rows = await fetchInvoiceRows(session, { FromDate: from, ToDate: to });
+    const buckets = new Map<string, { revenue: number; invoices: Set<string>; rows: number }>();
+    for (const row of rows) {
+      const dateValue = pickStr(row, SALES_DATE_FIELDS);
+      // RapidRMS's live payload uses `datetime` and may format it in the
+      // tenant locale rather than ISO. For a one-day API result, the endpoint
+      // itself provides the date boundary even if an older tenant omits it.
+      const businessDate = normalizeBusinessDate(dateValue) || (from === to ? from : null);
+      if (!businessDate || businessDate < from || businessDate > to) continue;
+      const bucket = buckets.get(businessDate) || { revenue: 0, invoices: new Set<string>(), rows: 0 };
+      bucket.revenue += pickNum(row, REVENUE_FIELDS) || 0;
+      const invoice = pickStr(row, INVOICE_FIELDS);
+      if (invoice) bucket.invoices.add(invoice);
+      bucket.rows++;
+      buckets.set(businessDate, bucket);
+    }
+    return [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([businessDate, bucket]) => ({ businessDate, revenue: Math.round(bucket.revenue * 100) / 100, transactions: bucket.invoices.size || bucket.rows }));
+  } finally {
+    await Promise.all(refs.map(ref => deleteCredential(ref).catch(() => {})));
   }
 }

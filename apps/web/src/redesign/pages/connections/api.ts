@@ -19,6 +19,7 @@ export type PlatformApp = {
   status?: string | null;
   required_scopes?: string[] | null;
   url?: string | null;
+  launch_url?: string | null;
   icon?: string | null;
   repo?: string | null;
   vault_namespace?: string | null;
@@ -29,10 +30,12 @@ export type CapabilityResource = { id: string; name: string; provider?: string |
 export type AppGrant = {
   app_key: string;
   status: string;
-  service_config?: { scopes?: string[] } | null;
+  service_config?: { scopes?: string[]; storeIds?: string[]; activationState?: string } | null;
   enabled_at?: string | null;
   source?: string | null;
 };
+
+export type StoreSyncJob = { id: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; progress: number; from_date: string; to_date: string; days_synced: number; rows_imported?: number; last_error?: string | null };
 
 const apiBase = () => (window as Window & { __AROS_API_URL__?: string }).__AROS_API_URL__
   || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
@@ -77,6 +80,14 @@ export async function removeStore(auth: AuthScope, id: string): Promise<void> {
   await request(`/api/connectors?id=${encodeURIComponent(id)}`, auth, { method: 'DELETE' });
 }
 
+export async function listStoreSyncs(auth: AuthScope): Promise<StoreSyncJob[]> {
+  return (await request<{ jobs?: StoreSyncJob[] }>('/api/store/sync', auth)).jobs || [];
+}
+
+export async function startStoreSync(auth: AuthScope, months = 12): Promise<StoreSyncJob> {
+  return (await request<{ job: StoreSyncJob }>('/api/store/sync', auth, { method: 'POST', body: JSON.stringify({ months, chunkDays: 7 }) })).job;
+}
+
 export async function listApps(auth: AuthScope): Promise<{ apps: PlatformApp[]; grants: AppGrant[] }> {
   const data = await request<{ apps?: Array<PlatformApp & { launch_url?: string | null }>; grants?: AppGrant[] }>('/api/apps', auth);
   return { apps: (data.apps || []).map(app => ({ ...app, url: app.url || app.launch_url || null })), grants: data.grants || [] };
@@ -87,9 +98,9 @@ export async function listCapabilityResources(auth: AuthScope, kind: 'skill' | '
   return data.resources || [];
 }
 
-export async function grantApp(auth: AuthScope, app: PlatformApp): Promise<void> {
+export async function grantApp(auth: AuthScope, app: PlatformApp, storeIds: string[] = []): Promise<void> {
   await request(`/api/apps/${encodeURIComponent(app.id)}/grant`, auth, {
-    method: 'POST', body: JSON.stringify({ scopes: app.required_scopes || [] }),
+    method: 'POST', body: JSON.stringify({ scopes: app.required_scopes || [], storeIds }),
   });
 }
 
@@ -101,3 +112,10 @@ export async function listMarketplaceEntitlements(auth: AuthScope): Promise<AppG
   const data = await request<{ entitlements?: AppGrant[] }>('/api/marketplace/entitlements', auth);
   return data.entitlements || [];
 }
+
+export async function createAppLaunch(auth: AuthScope, appId: string): Promise<string> {
+  const result = await request<{ launchUrl: string }>(`/api/apps/${encodeURIComponent(appId)}/launch`, auth, { method: 'POST' });
+  if (!result.launchUrl) throw new Error('The app did not return a launch destination');
+  return result.launchUrl;
+}
+

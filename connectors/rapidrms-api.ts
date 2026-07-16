@@ -5,14 +5,6 @@
 import type { RapidRmsApiConfig, RapidRmsSession, ConnectorTestResult } from './types.js';
 import { retrieveCredential } from './vault-ref.js';
 
-function unwrapEnvelope(body: Record<string, unknown>): Record<string, unknown> {
-  if (body.code === '999' && body.data) {
-    const data = typeof body.data === 'string' ? JSON.parse(body.data) : body.data;
-    return (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
-  }
-  return body;
-}
-
 // ── Authenticate ────────────────────────────────────────────────
 
 /** Authenticate with RapidRMS. Retrieves email + password from vault. */
@@ -29,7 +21,7 @@ export async function authenticate(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       grant_type: 'token',
-      client_id: config.clientId,
+      client_id: String(config.clientId),
       Username: email,
       Password: password,
     }),
@@ -39,15 +31,32 @@ export async function authenticate(
     throw new Error(`RapidRMS auth failed: ${res.status} ${res.statusText}`);
   }
 
-  const data = unwrapEnvelope((await res.json()) as Record<string, unknown>);
-  const token = String(data.access_token || data.Token || data.token || '');
-  if (!token) throw new Error('No token in RapidRMS auth response');
+  const envelope = (await res.json()) as Record<string, unknown>;
+  if (envelope.code !== undefined && String(envelope.code) !== '999') {
+    throw new Error(`RapidRMS auth rejected the request (code ${String(envelope.code)})`);
+  }
+  const rawData = envelope.data;
+  let parsedData: unknown = rawData || envelope;
+  if (typeof parsedData === 'string') {
+    try {
+      parsedData = JSON.parse(parsedData);
+    } catch {
+      throw new Error('RapidRMS auth response contained invalid JSON data');
+    }
+  }
+  if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+    throw new Error('RapidRMS auth response did not contain an authentication object');
+  }
+  const data = parsedData as Record<string, unknown>;
+  const token = String(data.access_token ?? '');
+  const dbName = String(data.DbName ?? '');
+  if (!token || !dbName) throw new Error('RapidRMS auth response did not include token and database context');
   const cookie = res.headers.get('set-cookie') ?? '';
   const timeout = config.sessionTimeout || 420;
 
   return {
     config,
-    dbName: String(data.DbName ?? ''),
+    dbName,
     token,
     cookie,
     expiresAt: Date.now() + timeout * 60 * 1000,
@@ -68,19 +77,24 @@ export async function request(
     throw new Error('Not authenticated — call authenticate() first');
   }
 
-  const url = `${session.config.baseUrl}${path}`;
+  const url = new URL(path, `${session.config.baseUrl.replace(/\/$/, '')}/`);
+  const normalizedMethod = method.toUpperCase();
+  if (params && (normalizedMethod === 'GET' || normalizedMethod === 'DELETE')) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+    }
+  }
   const opts: RequestInit = {
-    method,
+    method: normalizedMethod,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${session.token}`,
-      ClientId: session.config.clientId,
       DbName: session.dbName,
-      ...(session.cookie ? { Cookie: session.cookie } : {}),
+      Cookie: session.cookie,
     },
   };
 
-  if (params && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+  if (params && (normalizedMethod === 'POST' || normalizedMethod === 'PUT' || normalizedMethod === 'PATCH')) {
     opts.body = JSON.stringify(params);
   }
 
@@ -89,8 +103,7 @@ export async function request(
     throw new Error(`RapidRMS ${method} ${path}: ${res.status} ${res.statusText}`);
   }
 
-  const body = (await res.json()) as Record<string, unknown>;
-  return unwrapEnvelope(body);
+  return res.json();
 }
 
 // ── Test ────────────────────────────────────────────────────────
@@ -130,6 +143,19 @@ export function getDbName(session: RapidRmsSession): string {
 
 export async function getSalesDetail(session: RapidRmsSession, params?: Record<string, unknown>) {
   return request(session, 'POST', '/api/SalesDetail/Get', params);
+}
+
+/** Invoice report endpoint used by MIB's production RapidRMS ingestion. */
+export async function getInvoiceReport(session: RapidRmsSession, params?: Record<string, unknown>) {
+  try {
+    return await request(session, 'GET', '/api/InvoiceReport', params);
+  } catch (primaryError) {
+    try {
+      return await request(session, 'GET', '/api/InvoiceReport/GetAllInvoiceByCreatedDate', params);
+    } catch {
+      throw primaryError;
+    }
+  }
 }
 
 export async function getInventory(session: RapidRmsSession, params?: Record<string, unknown>) {
