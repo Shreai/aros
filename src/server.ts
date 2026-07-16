@@ -1630,7 +1630,9 @@ async function handlePlatformApps(req: IncomingMessage, res: ServerResponse, app
   const supabase = createSupabaseAdmin();
   if (req.method === 'GET') {
     const [{ data: apps, error }, { data: grants }] = await Promise.all([supabase.from('platform_apps').select('*').order('name'), supabase.from('marketplace_app_entitlements').select('app_key,status,service_config').eq('tenant_id', auth.tenantId)]);
-    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: apps || [], grants: grants || [] });
+    // Publish each app's capability bundle so the marketplace can show what
+    // activation unlocks (skills/agents/tools) before the user commits.
+    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: (apps || []).map(app => ({ ...app, bundle: APP_CAPABILITY_BUNDLES[app.id] || null })), grants: grants || [] });
   }
   if (!appId) return json(res, 400, { error: 'app id required' });
   if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
