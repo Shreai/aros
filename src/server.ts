@@ -54,6 +54,8 @@ import { handleEdgeRequest } from './edge/http.js';
 import { handleEdgeProvisioningRequest } from './edge/provisioning-http.js';
 import { EdgeProvisioningService } from './edge/provisioning.js';
 import { SupabaseEdgeProvisioningRepository } from './edge/supabase-provisioning-repository.js';
+import { handleAumNodeRequest } from './aum-nodes/http.js';
+import { handleAumNodeProvisioningRequest } from './aum-nodes/provisioning-http.js';
 import { createOidcRelyingParty } from './auth/oidc-rp.js';
 import { createMemoryOidcStore, createSupabaseOidcStore } from './auth/oidc-store.js';
 
@@ -2904,6 +2906,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   // ahead of the generic /v1 router proxy or enrollment and heartbeats are
   // forwarded to shre-router and return its unrelated 404 response.
   if (pathname.startsWith('/v1/edge/') && await handleEdgeRequest(req, res, pathname)) return;
+  if (pathname.startsWith('/v1/aum/nodes/') && await handleAumNodeRequest(req, res, pathname)) return;
 
   if (pathname.startsWith('/api/v1/')) {
     req.url = pathname.slice('/api'.length) + requestUrl.search;
@@ -3014,7 +3017,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     return handleActivateHumanConnectors(req, res);
   }
 
-  if (pathname.startsWith('/api/edge/')) {
+    if (pathname.startsWith('/api/edge/')) {
     const auth = await authenticateRequest(req);
     if (!auth) return json(res, 401, { error: 'Unauthorized' });
     const edgeProvisioning = new EdgeProvisioningService(new SupabaseEdgeProvisioningRepository(createSupabaseAdmin()));
@@ -3096,6 +3099,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (url === '/api/leads' && method === 'POST') {
     if (!rateLimit(req, 10, 60_000)) {
       return json(res, 429, { error: 'Too many requests. Please wait.' });
+    }
+    if (pathname.startsWith('/api/aum/nodes')) {
+      const auth = await authenticateRequest(req);
+      if (!auth) return json(res, 401, { error: 'Unauthorized' });
+      if (await handleAumNodeProvisioningRequest(req, res, pathname, auth)) return;
     }
     return handleLeadCapture(req, res);
   }
