@@ -57,16 +57,22 @@ export async function request(
     throw new Error('Not authenticated — call authenticate() first');
   }
 
-  const url = `${session.config.baseUrl}${path}`;
+  const url = new URL(path, `${session.config.baseUrl.replace(/\/$/, '')}/`);
+  const normalizedMethod = method.toUpperCase();
+  if (params && (normalizedMethod === 'GET' || normalizedMethod === 'DELETE')) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+    }
+  }
   const opts: RequestInit = {
-    method,
+    method: normalizedMethod,
     headers: {
       'Content-Type': 'application/json',
       Cookie: session.cookie,
     },
   };
 
-  if (params && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+  if (params && (normalizedMethod === 'POST' || normalizedMethod === 'PUT' || normalizedMethod === 'PATCH')) {
     opts.body = JSON.stringify(params);
   }
 
@@ -115,6 +121,19 @@ export function getDbName(session: RapidRmsSession): string {
 
 export async function getSalesDetail(session: RapidRmsSession, params?: Record<string, unknown>) {
   return request(session, 'POST', '/api/SalesDetail/Get', params);
+}
+
+/** Invoice report endpoint used by MIB's production RapidRMS ingestion. */
+export async function getInvoiceReport(session: RapidRmsSession, params?: Record<string, unknown>) {
+  try {
+    return await request(session, 'GET', '/api/InvoiceReport', params);
+  } catch (primaryError) {
+    try {
+      return await request(session, 'GET', '/api/InvoiceReport/GetAllInvoiceByCreatedDate', params);
+    } catch {
+      throw primaryError;
+    }
+  }
 }
 
 export async function getInventory(session: RapidRmsSession, params?: Record<string, unknown>) {
