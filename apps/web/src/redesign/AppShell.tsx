@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useArosTheme } from '../lib/useArosTheme';
 import { ConciergeChat } from './ConciergeChat';
 import { SectionPanel } from './SectionPanel';
+import { ConnectWizard } from './ConnectWizard';
 import {
   PRIMARY_NAV, WORKSPACE_NAV, HEALTH, USER, ROLES, SECTION_TITLES, type SectionKey, type NavItem,
 } from './shellData';
@@ -24,7 +25,17 @@ function NavButton({ item, active, onClick }: { item: NavItem; active: boolean; 
 export function AppShell() {
   const [section, setSection] = useState<SectionKey>('chat');
   const [role, setRole] = useState<string>(USER.role);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const { label: themeLabel, toggle: toggleTheme } = useArosTheme();
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const openWizard = () => setWizardOpen(true);
 
   return (
     <div className="aros-shell">
@@ -90,8 +101,18 @@ export function AppShell() {
           </span>
           <button className="aros-topbar__toggle" onClick={toggleTheme}>{themeLabel}</button>
         </header>
-        {section === 'chat' ? <ConciergeChat /> : <SectionPanel section={section} />}
+        {section === 'chat'
+          ? <ConciergeChat onConnect={openWizard} />
+          : <SectionPanel section={section} onConnect={openWizard} />}
       </div>
+
+      {wizardOpen && (
+        <ConnectWizard
+          onClose={() => setWizardOpen(false)}
+          onDone={name => { setWizardOpen(false); setToast(`${name} connected — discovering stores…`); }}
+        />
+      )}
+      {toast && <div className="rsx-toast">✓ {toast}</div>}
     </div>
   );
 }

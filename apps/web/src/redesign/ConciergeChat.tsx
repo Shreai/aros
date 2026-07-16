@@ -6,7 +6,7 @@ import { CONCIERGE_SEED, SUGGESTIONS, type ChatMsg } from './shellData';
  * reply; real wiring posts to the shre-router POST /v1/chat and streams back
  * (the existing ArosChat transport), rendering the same bubbles.
  */
-export function ConciergeChat() {
+export function ConciergeChat({ onConnect }: { onConnect?: () => void }) {
   const [messages, setMessages] = useState<ChatMsg[]>(CONCIERGE_SEED);
   const [draft, setDraft] = useState('');
 
@@ -41,7 +41,7 @@ export function ConciergeChat() {
 
       <div className="aros-composer">
         <div className="aros-chips">
-          <button className="aros-chip" type="button"><span className="aros-chip__dot" />Connect Store</button>
+          <button className="aros-chip" type="button" onClick={onConnect}><span className="aros-chip__dot" />Connect Store</button>
           <button className="aros-chip" type="button"><span className="aros-chip__dot" />Connect Apps</button>
         </div>
         <form className="aros-inputrow" onSubmit={(e: FormEvent) => { e.preventDefault(); send(draft); }}>

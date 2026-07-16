@@ -85,15 +85,11 @@ export const SECTIONS: Record<Exclude<SectionKey, 'chat'>, SectionSpec> = {
   },
   stores: {
     eyebrow: 'Connections', primaryCta: 'Connect POS',
-    lead: 'Connect each POS account, discover its stores, and control exactly what Shre can read and change. Credentials are sealed in the Shreai vault.',
-    stats: [{ value: 1, label: 'Connected' }, { value: 5, label: 'Mapped stores' }, { value: 6, label: 'Providers' }],
+    lead: 'Connect your POS, discover its stores, and control exactly what Shre can read and change. Credentials are sealed in the Shreai vault. We support RapidRMS and Verifone Commander today.',
+    stats: [{ value: 1, label: 'Connected' }, { value: 5, label: 'Mapped stores' }, { value: 2, label: 'Providers' }],
     rows: [
       { mark: 'RA', title: 'RapidRMS', sub: 'Main St · Oak Ave · 3rd St Express · Harbor · Elm St Express', ...rowStatus(s('on', 'Connected')), action: 'Manage' },
-      { mark: 'VE', title: 'Verifone Commander', sub: 'Site controller · token expiring soon', ...rowStatus(s('warn', 'Needs attention')), action: 'Fix' },
-      { mark: 'CL', title: 'Clover', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
-      { mark: 'SQ', title: 'Square', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
-      { mark: 'NC', title: 'NCR', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
-      { mark: 'GI', title: 'Gilbarco Passport', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'VF', title: 'Verifone Commander', sub: 'Site controller · token expiring soon', ...rowStatus(s('warn', 'Needs attention')), action: 'Fix' },
     ],
   },
   apps: {
@@ -177,6 +173,33 @@ export const SECTIONS: Record<Exclude<SectionKey, 'chat'>, SectionSpec> = {
     note: { title: 'Security baseline', body: 'OAuth is preferred over API keys. Secrets are sealed in the Shreai vault; permissions are scoped by workspace, connection, store, capability, and action.' },
   },
 };
+
+// Connect-a-register wizard. POS scoped to RapidRMS + Verifone Commander only.
+export interface WizField { label: string; ph: string; secret?: boolean; }
+export interface PosProvider {
+  id: string; name: string; mark: string; desc: string; tag?: string;
+  kind: 'api' | 'tunnel'; blurb: string; fields: WizField[];
+}
+export const POS_PROVIDERS: PosProvider[] = [
+  {
+    id: 'rapidrms', name: 'RapidRMS', mark: 'RMS', tag: 'Recommended', kind: 'api',
+    desc: 'Cloud POS for convenience & fuel. Live sales, inventory, price book.',
+    blurb: 'Paste the API key from your RapidRMS dashboard. AROS connects over HTTPS for read access to live sales, inventory, and the price book — no on-site hardware needed.',
+    fields: [{ label: 'API key', ph: 'rms_live_••••••••', secret: true }, { label: 'Account ID', ph: 'fivepoints' }],
+  },
+  {
+    id: 'verifone', name: 'Verifone Commander', mark: 'VF', kind: 'tunnel',
+    desc: 'Fuel controller & forecourt. Secure tunnel to the site controller.',
+    blurb: 'Install a tunnel agent on the store controller, then enter its LAN address and the Commander service credentials. Traffic stays on an encrypted tunnel — nothing is exposed publicly.',
+    fields: [
+      { label: 'Site controller IP', ph: '192.168.10.20' },
+      { label: 'Service username', ph: 'aros_svc' },
+      { label: 'Service password', ph: '••••••••', secret: true },
+      { label: 'Tunnel agent ID', ph: 'agt_fp_harbor' },
+    ],
+  },
+];
+export const STORES_SCOPE = ['Main St', 'Oak Ave', '3rd St Express', 'Harbor', 'Elm St Express'];
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
   chat: 'Concierge', stores: 'Stores', apps: 'Apps', skills: 'Skills', agents: 'Agents',

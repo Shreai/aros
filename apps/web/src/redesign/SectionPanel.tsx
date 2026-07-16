@@ -76,8 +76,9 @@ function FormPanel({ fields }: { fields: FormField[] }) {
  * POS/app providers, models, members). Cutover swaps these static specs for
  * live fetches — the render layer stays the same.
  */
-export function SectionPanel({ section }: { section: Exclude<SectionKey, 'chat'> }) {
+export function SectionPanel({ section, onConnect }: { section: Exclude<SectionKey, 'chat'>; onConnect?: () => void }) {
   const spec = SECTIONS[section];
+  const ctaOpensWizard = section === 'stores';
   return (
     <div className="rsx-panel">
       <div className="rsx-panel__head">
@@ -85,7 +86,9 @@ export function SectionPanel({ section }: { section: Exclude<SectionKey, 'chat'>
           <div className="rsx-panel__eyebrow">{spec.eyebrow}</div>
           <p className="rsx-panel__lead">{spec.lead}</p>
         </div>
-        {spec.primaryCta && <button className="rsx-panel__cta" type="button">{spec.primaryCta}</button>}
+        {spec.primaryCta && (
+          <button className="rsx-panel__cta" type="button" onClick={ctaOpensWizard ? onConnect : undefined}>{spec.primaryCta}</button>
+        )}
       </div>
 
       {spec.stats && <StatRow stats={spec.stats} />}
