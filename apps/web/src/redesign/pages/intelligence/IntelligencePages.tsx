@@ -12,7 +12,7 @@ function StatePanel({ title, detail, action }: { title: string; detail: string; 
   return <div className="rsx2-empty" role="status"><div className="rsx2-empty__title">{title}</div><div className="rsx2-empty__text">{detail}</div>{action && <button className="rsx-panel__cta" type="button" onClick={action}>Try again</button>}</div>;
 }
 
-export function IntelligencePage({ kind }: { kind: IntelligenceKind }) {
+export function IntelligencePage({ kind, onBrowse }: { kind: IntelligenceKind; onBrowse?: () => void }) {
   const { session, tenant } = useAuth();
   const [items, setItems] = useState<IntelligenceResource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +39,7 @@ export function IntelligencePage({ kind }: { kind: IntelligenceKind }) {
   };
 
   return <div className="rsx-panel">
-    <div className="rsx-panel__head"><div><div className="rsx-panel__eyebrow">{copy.eyebrow}</div><p className="rsx-panel__lead">{copy.lead}</p></div></div>
+    <div className="rsx-panel__head"><div><div className="rsx-panel__eyebrow">{copy.eyebrow}</div><p className="rsx-panel__lead">{copy.lead}</p></div>{onBrowse && kind !== 'model' && <div className="rsx-section-actions"><button className="rsx-panel__cta" type="button" onClick={onBrowse}>Browse Marketplace</button></div>}</div>
     {!loading && items.length > 0 && <label className="rsx-form__field"><span className="rsx-form__label">Search</span><input className="rsx-form__input" value={query} onChange={event => setQuery(event.target.value)} placeholder={`Search ${kind}s`} /></label>}
     {error && <div className="rsx-note" role="alert"><div className="rsx-note__title">Needs attention</div><div className="rsx-note__body">{error}</div></div>}
     {loading ? <StatePanel title="Loading…" detail={`Checking the live ${kind} service.`} />

@@ -24,7 +24,7 @@ export function MarketplacePage() {
   async function toggle(app: PlatformApp) { setBusy(app.id); setError(''); try { if (active.has(app.id)) await disableApp(auth, app.id); else await grantApp(auth, app); await load(); setSelected(null); } catch (e) { setError(e instanceof Error ? e.message : 'App update failed'); } finally { setBusy(''); } }
   const q = query.toLowerCase();
   const catalog = tab === 'connectors' ? CONNECTORS : tab === 'plugins' ? PLUGINS : AGENTS;
-  return <div className="rsx-panel">
+  return <div className="rsx-panel rsx-marketplace-layout">
     <div className="rsx-panel__head"><div><div className="rsx-panel__eyebrow">Marketplace</div><p className="rsx-panel__lead">Discover apps and review their access before activating them.</p></div></div>
     <div className="rsx2-tabs" role="tablist">{TABS.map(item => <button key={item.id} role="tab" aria-selected={tab === item.id} className={`rsx2-tab ${tab === item.id ? 'is-on' : ''}`} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
     <div className="rsx-form"><label className="rsx-form__field"><span className="rsx-form__label">Search Marketplace</span><input className="rsx-form__input" value={query} onChange={event => setQuery(event.target.value)} placeholder={`Search ${tab}`} /></label></div>

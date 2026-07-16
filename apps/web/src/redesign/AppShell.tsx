@@ -3,7 +3,7 @@ import { useArosTheme } from '../lib/useArosTheme';
 import { ConciergeChat } from './ConciergeChat';
 import { SectionPanel } from './SectionPanel';
 import { IntelligencePage } from './pages/intelligence';
-import { StoresPage, AppsPage } from './pages/connections';
+import { StoresPage, MarketplacePage, AppsPage, ConnectorsPage, PluginsPage } from './pages/connections';
 import {
   BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage,
 } from './pages/admin';
@@ -24,14 +24,14 @@ const MenuIcon = () => (<svg width="18" height="18" viewBox="0 0 24 24" fill="no
 const PlusIcon = () => (<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>);
 
 const PATH_TO_SECTION: Record<string, Exclude<SectionKey, 'chat'>> = {
-  '/stores': 'stores', '/apps': 'apps', '/skills': 'skills', '/agents': 'agents',
+  '/stores': 'stores', '/marketplace': 'marketplace', '/apps': 'apps', '/connectors': 'connectors', '/plugins': 'plugins', '/skills': 'skills', '/agents': 'agents',
   '/models': 'models', '/connection-health': 'health', '/settings': 'settings',
   '/permissions': 'permissions',
   '/profile': 'settings', '/billing': 'billing', '/costs': 'usage', '/users': 'team',
-  '/workspace': 'settings', '/marketplace': 'apps', '/channels': 'apps',
+  '/workspace': 'settings', '/channels': 'connectors',
 };
 const SECTION_TO_PATH: Partial<Record<SectionKey, string>> = {
-  stores: '/stores', apps: '/marketplace', skills: '/skills', agents: '/agents',
+  stores: '/stores', marketplace: '/marketplace', apps: '/apps', connectors: '/connectors', plugins: '/plugins', skills: '/skills', agents: '/agents',
   models: '/models', health: '/connection-health', settings: '/settings',
   billing: '/billing', usage: '/costs', team: '/users', permissions: '/permissions',
 };
@@ -136,7 +136,10 @@ export function AppShell() {
   const renderSection = () => {
     if (demo) return <SectionPanel section={section} onConnect={openWizard} />;
     if (section === 'stores') return <StoresPage key={storesVersion} onConnect={openWizard} />;
-    if (section === 'apps') return <AppsPage />;
+    if (section === 'marketplace') return <MarketplacePage />;
+    if (section === 'apps') return <AppsPage onBrowse={() => goSection('marketplace')} />;
+    if (section === 'connectors') return <ConnectorsPage onBrowse={() => goSection('marketplace')} />;
+    if (section === 'plugins') return <PluginsPage onBrowse={() => goSection('marketplace')} />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
     if (section === 'team') return <TeamPage />;
@@ -145,7 +148,7 @@ export function AppShell() {
     if (section === 'settings') return <SettingsPage />;
     if (section === 'skills' || section === 'agents' || section === 'models') {
       const kind = section === 'skills' ? 'skill' : section === 'agents' ? 'agent' : 'model';
-      return <IntelligencePage kind={kind} />;
+      return <IntelligencePage kind={kind} onBrowse={section === 'models' ? undefined : () => goSection('marketplace')} />;
     }
     return <SectionPanel section={section} onConnect={openWizard} />;
   };
@@ -174,7 +177,7 @@ export function AppShell() {
               <div className="rsx2-model"><span className="rsx2-model__btn">Shre · Local</span></div>
               <button className="rsx2-chatpane__new" onClick={newChat}><PlusIcon /> New chat</button>
             </div>
-            <ConciergeChat key={chatKey} onConnect={openWizard} onConnectApps={() => goSection('apps')} seed={seed} focusOnMount initial={recalled ?? undefined} onCanvasItems={onCanvasItems} />
+            <ConciergeChat key={chatKey} onConnect={openWizard} onConnectApps={() => goSection('marketplace')} seed={seed} focusOnMount initial={recalled ?? undefined} onCanvasItems={onCanvasItems} />
           </aside>
           <div className="rsx2-canvaswrap">
             <div className="rsx2-tabs">

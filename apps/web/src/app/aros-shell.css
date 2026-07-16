@@ -215,6 +215,16 @@
   box-shadow: var(--shadow-btn); transition: background 0.15s, box-shadow 0.15s;
 }
 .rsx-panel__cta:hover { background: var(--accent-2); box-shadow: var(--shadow-btn-hover); }
+.rsx-marketplace-layout { display: flex; flex-direction: column; gap: 22px; }
+.rsx-marketplace-layout .rsx-panel__head,
+.rsx-marketplace-layout .rsx-form { margin: 0; }
+.rsx-marketplace-layout .rsx2-tabs { align-self: flex-start; }
+.rsx-section-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.rsx-marketplace-layout { display: flex; flex-direction: column; gap: 22px; }
+.rsx-marketplace-layout .rsx-panel__head,
+.rsx-marketplace-layout .rsx-form { margin: 0; }
+.rsx-marketplace-layout .rsx2-tabs { align-self: flex-start; }
+.rsx-section-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 
 .rsx-stats { display: flex; gap: 12px; margin-bottom: 20px; }
 .rsx-stat {

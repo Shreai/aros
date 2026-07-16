@@ -31,6 +31,7 @@ export type AppGrant = {
   status: string;
   service_config?: { scopes?: string[] } | null;
   enabled_at?: string | null;
+  source?: string | null;
 };
 
 const apiBase = () => (window as Window & { __AROS_API_URL__?: string }).__AROS_API_URL__
@@ -94,4 +95,9 @@ export async function grantApp(auth: AuthScope, app: PlatformApp): Promise<void>
 
 export async function disableApp(auth: AuthScope, appId: string): Promise<void> {
   await request(`/api/marketplace/apps/${encodeURIComponent(appId)}/disable`, auth, { method: 'POST' });
+}
+
+export async function listMarketplaceEntitlements(auth: AuthScope): Promise<AppGrant[]> {
+  const data = await request<{ entitlements?: AppGrant[] }>('/api/marketplace/entitlements', auth);
+  return data.entitlements || [];
 }
