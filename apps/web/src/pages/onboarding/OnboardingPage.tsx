@@ -78,6 +78,7 @@ export function OnboardingPage() {
   const [posConnected, setPosConnected] = useState(false);
   const [posLoading, setPosLoading] = useState(false);
   const [posError, setPosError] = useState('');
+  const [deviceRequested, setDeviceRequested] = useState(false);
 
   async function completeOnboarding(input?: {
     companyName?: string;
@@ -264,7 +265,11 @@ export function OnboardingPage() {
   }
 
   // ── Connect POS (edge activation for Verifone; cloud for RapidRMS) ──────────
-  async function startVerifoneConnect() {
+  // Auto-provision the activation token the moment the user picks Verifone — no
+  // button, no code to read. The token rides inside the installer/device, so the
+  // user never types or pastes anything.
+  async function provisionVerifone() {
+    if (activation || !storeId) return;
     setPosLoading(true);
     setPosError('');
     try {
@@ -274,21 +279,63 @@ export function OnboardingPage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session?.access_token || ''}`,
         },
-        body: JSON.stringify({ storeId, connectorId: 'verifone', expiresInMinutes: 1440 }),
+        body: JSON.stringify({ storeId, connectorId: 'verifone', expiresInMinutes: 10080 }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not generate an activation code.');
+      if (!res.ok) throw new Error(data.error || 'Could not prepare your connection.');
       setActivation({ code: data.activationCode, expiresAt: data.expiresAt });
     } catch (err) {
-      setPosError(err instanceof Error ? err.message : 'Could not start the connection.');
+      setPosError(err instanceof Error ? err.message : 'Could not prepare your connection.');
     } finally {
       setPosLoading(false);
     }
   }
 
-  // Poll onboarding status while a Verifone activation is pending.
+  // Auto-provision as soon as Verifone is selected and the store is ready.
   useEffect(() => {
-    if (step !== 'connect-pos' || !activation || posConnected || !storeId) return;
+    if (selectedPos === 'verifone' && storeId && !activation && !posLoading) {
+      void provisionVerifone();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPos, storeId]);
+
+  // Personalized installer URL — the activation token is baked into the download,
+  // so the on-site app self-activates with nothing for the user to enter.
+  function installerUrl(os: 'win' | 'mac' | 'linux') {
+    const base = `https://download.shreai.com/verifone-edge-relay/latest/${os}`;
+    return activation ? `${base}?token=${encodeURIComponent(activation.code)}` : base;
+  }
+
+  // "Ship me a plug-in device" — records the request; ops mails a pre-configured
+  // appliance that auto-connects (its token is already provisioned).
+  async function requestDevice() {
+    if (!storeId) return;
+    setPosLoading(true);
+    setPosError('');
+    try {
+      const res = await fetch(`${API_BASE}/api/edge/request-device`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token || ''}`,
+        },
+        body: JSON.stringify({ storeId, connectorId: 'verifone' }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Could not submit your request.');
+      }
+      setDeviceRequested(true);
+    } catch (err) {
+      setPosError(err instanceof Error ? err.message : 'Could not submit your request.');
+    } finally {
+      setPosLoading(false);
+    }
+  }
+
+  // Poll onboarding status while a Verifone connection is pending (either path).
+  useEffect(() => {
+    if (step !== 'connect-pos' || selectedPos !== 'verifone' || posConnected || !storeId) return;
     let active = true;
     const timer = setInterval(async () => {
       try {
@@ -309,7 +356,7 @@ export function OnboardingPage() {
       active = false;
       clearInterval(timer);
     };
-  }, [step, activation, posConnected, storeId, session]);
+  }, [step, selectedPos, posConnected, storeId, session]);
 
   const stepIndex = ['verify-email', 'choose-plan', 'payment', 'business-setup', 'connect-pos', 'complete'].indexOf(step);
 
@@ -625,59 +672,63 @@ export function OnboardingPage() {
             )}
 
             {selectedPos === 'verifone' && !posConnected && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                {!activation ? (
-                  <>
-                    <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>
-                      Verifone Commander lives on your store network, so it needs a
-                      small edge app on an on-site computer. Generate an activation
-                      code, install the app, and paste the code to link it.
-                    </p>
-                    {posError && <div style={styles.error}>{posError}</div>}
-                    <button type="button" onClick={startVerifoneConnect} disabled={posLoading || !storeId} style={styles.button}>
-                      {posLoading ? 'Generating…' : 'Get activation code'}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>
+                  Your POS is on the store network, so one small helper runs on-site.
+                  Pick the easy way — everything else is set up for you automatically.
+                </p>
+
+                {/* Option 1 — plug-in device (easiest, zero install) */}
+                {!deviceRequested ? (
+                  <div style={styles.posCard}>
+                    <div style={{ fontWeight: 700, color: '#1a1a2e' }}>📦 Ship me a plug-in device <span style={{ fontSize: 11, color: '#059669' }}>(easiest)</span></div>
+                    <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 10 }}>
+                      We mail a pre-configured device. Plug it into your network and power — that's it. It connects itself.
+                    </div>
+                    <button type="button" onClick={requestDevice} disabled={posLoading || !storeId} style={{ ...styles.button, marginTop: 0 }}>
+                      {posLoading ? 'Please wait…' : 'Send me a device'}
                     </button>
-                    {!storeId && (
-                      <div style={{ fontSize: 12, color: '#9ca3af' }}>
-                        Preparing your store… if this persists, you can connect from the dashboard.
-                      </div>
-                    )}
-                  </>
+                  </div>
                 ) : (
-                  <>
-                    <div style={{ background: '#f0f4ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: 16, textAlign: 'center' }}>
-                      <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 6 }}>Activation code</div>
-                      <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 4, color: '#1a1a2e', fontFamily: 'monospace' }}>
-                        {activation.code}
-                      </div>
+                  <div style={{ background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 12, padding: 16 }}>
+                    <div style={{ fontWeight: 700, color: '#059669' }}>✅ Device on the way</div>
+                    <div style={{ fontSize: 13, color: '#374151' }}>
+                      We'll email you tracking. When it arrives, plug it in — your store goes live automatically.
                     </div>
-                    <ol style={{ fontSize: 13, color: '#374151', paddingLeft: 18, margin: 0, lineHeight: 1.7 }}>
-                      <li>
-                        Install the edge app on a store computer:{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/win" style={styles.link} target="_blank" rel="noopener">Windows</a>,{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/mac" style={styles.link} target="_blank" rel="noopener">macOS</a>,{' '}
-                        <a href="https://download.shreai.com/verifone-edge-relay/latest/linux" style={styles.link} target="_blank" rel="noopener">Linux</a>.
-                      </li>
-                      <li>In the setup wizard, enter your Commander IP (usually <code>192.168.31.11</code>) and credentials — they stay on-site.</li>
-                      <li>Paste the activation code above to link it to this store.</li>
-                    </ol>
-                    <div style={{ fontSize: 12, color: '#6b7280', background: '#f9fafb', borderRadius: 8, padding: 10 }}>
-                      Don't want to manage a computer? <strong>We can host the edge for you</strong> — reply to your welcome email and we'll set up a managed device.
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#6b7280' }}>
-                      <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' }} />
-                      Waiting for your edge app to connect…
-                    </div>
-                  </>
+                  </div>
                 )}
+
+                {/* Option 2 — one-click install on an existing computer */}
+                <div style={styles.posCard}>
+                  <div style={{ fontWeight: 700, color: '#1a1a2e' }}>⬇️ Install on a store computer <span style={{ fontSize: 11, color: '#6b7280' }}>(instant)</span></div>
+                  <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 10 }}>
+                    Download, double-click, done. It finds your POS on the network by itself — nothing to type in.
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <a href={installerUrl('win')} style={{ ...styles.button, textAlign: 'center', textDecoration: 'none', flex: 1, minWidth: 90, opacity: activation ? 1 : 0.5, pointerEvents: activation ? 'auto' : 'none' }}>Windows</a>
+                    <a href={installerUrl('mac')} style={{ ...styles.button, textAlign: 'center', textDecoration: 'none', flex: 1, minWidth: 90, background: '#111827', opacity: activation ? 1 : 0.5, pointerEvents: activation ? 'auto' : 'none' }}>macOS</a>
+                    <a href={installerUrl('linux')} style={{ ...styles.button, textAlign: 'center', textDecoration: 'none', flex: 1, minWidth: 90, background: '#374151', opacity: activation ? 1 : 0.5, pointerEvents: activation ? 'auto' : 'none' }}>Linux</a>
+                  </div>
+                  {!activation && !posError && (
+                    <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 8 }}>Preparing your secure download…</div>
+                  )}
+                </div>
+
+                {posError && <div style={styles.error}>{posError}</div>}
+
+                {/* Live status */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#6b7280', justifyContent: 'center', marginTop: 4 }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' }} />
+                  Waiting for your store to connect… this page updates automatically.
+                </div>
               </div>
             )}
 
             {selectedPos === 'verifone' && posConnected && (
               <div style={{ textAlign: 'center', padding: '8px 0' }}>
                 <div style={{ fontSize: 40 }}>✅</div>
-                <div style={{ fontWeight: 700, color: '#059669', margin: '8px 0' }}>Store connected</div>
-                <p style={{ fontSize: 13, color: '#6b7280' }}>Your Verifone data is flowing in.</p>
+                <div style={{ fontWeight: 700, color: '#059669', margin: '8px 0' }}>You're live!</div>
+                <p style={{ fontSize: 13, color: '#6b7280' }}>Your store is connected and data is flowing in.</p>
               </div>
             )}
 
@@ -693,7 +744,7 @@ export function OnboardingPage() {
                 {posConnected ? 'Continue' : 'Skip for now'}
               </button>
               {selectedPos && !posConnected && (
-                <button type="button" onClick={() => { setSelectedPos(null); setActivation(null); setPosError(''); }} style={{ ...styles.button, flex: 1, background: '#f3f4f6', color: '#374151' }}>
+                <button type="button" onClick={() => { setSelectedPos(null); setActivation(null); setPosError(''); setDeviceRequested(false); }} style={{ ...styles.button, flex: 1, background: '#f3f4f6', color: '#374151' }}>
                   Back
                 </button>
               )}

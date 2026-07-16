@@ -670,6 +670,57 @@ async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse)
   }
 }
 
+async function handleRequestDevice(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: AuthContext,
+): Promise<void> {
+  const body = await parseJsonBody(req);
+  const storeId = body && typeof body.storeId === 'string' ? body.storeId : null;
+  const connectorId =
+    body && typeof body.connectorId === 'string' ? body.connectorId : 'verifone';
+  if (!storeId) return json(res, 400, { error: 'storeId is required' });
+
+  try {
+    const supabase = createSupabaseAdmin();
+    // Flag the store so ops can fulfill; keep it idempotent (metadata merge).
+    const { data: store } = await supabase
+      .from('stores')
+      .select('id, metadata, name, address')
+      .eq('id', storeId)
+      .eq('tenant_id', auth.tenantId)
+      .maybeSingle();
+    if (!store) return json(res, 404, { error: 'Store not found' });
+
+    const metadata = {
+      ...(store.metadata as Record<string, unknown> | null),
+      appliance: {
+        requested: true,
+        connector: connectorId,
+        requested_at: new Date().toISOString(),
+        requested_by: auth.userId,
+        status: 'requested',
+      },
+    };
+    await supabase.from('stores').update({ metadata }).eq('id', storeId);
+
+    await auditLog({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      action: 'edge.device.requested',
+      resource: 'store',
+      detail: { storeId, connectorId },
+      ip: getClientIp(req),
+    });
+
+    json(res, 200, { ok: true, status: 'requested' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to request device';
+    console.error('[edge/request-device]', message);
+    json(res, 500, { error: message });
+  }
+}
+
 async function handleOnboardingComplete(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJsonBody(req);
   if (!body) return json(res, 400, { error: 'Invalid JSON' });
@@ -2522,6 +2573,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname.startsWith('/api/edge/')) {
     const auth = await authenticateRequest(req);
     if (!auth) return json(res, 401, { error: 'Unauthorized' });
+    // Appliance fulfillment — the non-technical "ship me a plug-in device" path.
+    // Records the request so ops can mail a pre-configured device; the store's
+    // activation token is already provisioned, so the device auto-connects.
+    if (pathname === '/api/edge/request-device' && method === 'POST') {
+      return handleRequestDevice(req, res, auth);
+    }
     const edgeProvisioning = new EdgeProvisioningService(new SupabaseEdgeProvisioningRepository(createSupabaseAdmin()));
     if (await handleEdgeProvisioningRequest(req, res, pathname, auth, edgeProvisioning)) return;
   }
