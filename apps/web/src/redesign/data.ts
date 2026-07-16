@@ -99,12 +99,59 @@ export function useSection(key: Exclude<SectionKey, 'chat'>): { spec: SectionSpe
       if (alive) setLoading(false);
     }
 
+    async function health() {
+      setLoading(true);
+      const data = await getJson('/api/connectors', session, tenant);
+      const conns = ((data?.connectors) || []) as any[];
+      const healthy = conns.filter(c => c.status === 'connected').length;
+      const down = conns.filter(c => c.status === 'error').length;
+      const degraded = conns.length - healthy - down;
+      const rows: Row[] = conns.map(c => ({
+        mark: String(c.name || c.type || '?').slice(0, 2).toUpperCase(), title: c.name || c.type,
+        sub: c.last_error || c.last_tested || '', status: asStatus(c.status),
+        statusLabel: c.status === 'connected' ? 'Healthy' : c.status === 'error' ? 'Down' : 'Degraded', action: 'Details',
+      }));
+      setIf(conns.length ? { ...base, stats: [{ value: healthy, label: 'Healthy' }, { value: degraded, label: 'Degraded' }, { value: down, label: 'Down' }], rows } : base);
+      if (alive) setLoading(false);
+    }
+    async function billingLike(which: 'billing' | 'usage') {
+      setLoading(true);
+      const q = tenant?.id ? `?tenantId=${encodeURIComponent(tenant.id)}` : '';
+      const data = await getJson(`/api/billing/status${q}`, session, tenant);
+      const sub = (data?.subscription) || data || {};
+      if (which === 'billing') {
+        const plan = data?.plan || data?.license_tier;
+        setIf(plan ? { ...base, stats: [{ value: String(plan), label: 'Plan' }, { value: String(data?.billing_status || 'active'), label: 'Status' }] } : base);
+      } else {
+        const stats = [];
+        if (Number.isFinite(Number(sub.totalRequests))) stats.push({ value: Number(sub.totalRequests).toLocaleString(), label: 'Requests' });
+        if (Number.isFinite(Number(sub.totalCostUsd))) stats.push({ value: `$${Number(sub.totalCostUsd).toFixed(2)}`, label: 'Spend' });
+        setIf(stats.length ? { ...base, stats } : base);
+      }
+      if (alive) setLoading(false);
+    }
+    function team() {
+      const email = session?.user?.email || (session as any)?.user?.email || '';
+      const name = (session?.user?.user_metadata?.full_name) || email.split('@')[0] || 'You';
+      const initials = String(name).split(/\s+/).map((s: string) => s[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || 'U';
+      setIf({ ...base, stats: [{ value: 1, label: 'Members' }], rows: [{ mark: initials, title: name, sub: `${email} · Owner`, status: 'on', statusLabel: 'Active', action: 'Manage' }] });
+    }
+    function settings() {
+      setIf({ ...base, form: [{ label: 'Workspace name', value: tenant?.name || '', type: 'text' }, ...(SECTIONS.settings.form || []).slice(1)], note: SECTIONS.settings.note });
+    }
+
     if (key === 'stores') connectors(true);
     else if (key === 'apps') resources('app');
     else if (key === 'models') resources('model');
     else if (key === 'skills') resources('skill');
     else if (key === 'agents') resources('agent');
-    else setSpec(base); // permissions/health/team/billing/usage/settings — empty until wired
+    else if (key === 'health') health();
+    else if (key === 'billing') billingLike('billing');
+    else if (key === 'usage') billingLike('usage');
+    else if (key === 'team') team();
+    else if (key === 'settings') settings();
+    else if (key === 'permissions') setSpec(SECTIONS.permissions); // role scopes are product policy, not tenant data
+    else setSpec(base);
     return () => { alive = false; };
   }, [key, demo, session, tenant]); // eslint-disable-line react-hooks/exhaustive-deps
 
