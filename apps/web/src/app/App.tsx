@@ -65,7 +65,7 @@ function AppContent() {
   }
 
   // ── Public auth pages (no session required) ────────────────
-  if (path === '/login') {
+  if (path === '/login' || path === '/auth') {
     const isHostedResume = new URLSearchParams(window.location.search).has('return_to');
     if (session && !loading && !isHostedResume) {
       // New users land in the value-first demo chat (/start), not the wizard.
