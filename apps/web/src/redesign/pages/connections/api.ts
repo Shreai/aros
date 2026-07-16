@@ -18,13 +18,14 @@ export type PlatformApp = {
   status?: string | null;
   required_scopes?: string[] | null;
   url?: string | null;
+  launch_url?: string | null;
   icon?: string | null;
 };
 
 export type AppGrant = {
   app_key: string;
   status: string;
-  service_config?: { scopes?: string[] } | null;
+  service_config?: { scopes?: string[]; storeIds?: string[]; activationState?: string } | null;
   enabled_at?: string | null;
 };
 
@@ -68,12 +69,12 @@ export async function removeStore(auth: AuthScope, id: string): Promise<void> {
 
 export async function listApps(auth: AuthScope): Promise<{ apps: PlatformApp[]; grants: AppGrant[] }> {
   const data = await request<{ apps?: PlatformApp[]; grants?: AppGrant[] }>('/api/apps', auth);
-  return { apps: data.apps || [], grants: data.grants || [] };
+  return { apps: (data.apps || []).map(app => ({ ...app, url: app.url || app.launch_url || null })), grants: data.grants || [] };
 }
 
-export async function grantApp(auth: AuthScope, app: PlatformApp): Promise<void> {
+export async function grantApp(auth: AuthScope, app: PlatformApp, storeIds: string[] = []): Promise<void> {
   await request(`/api/apps/${encodeURIComponent(app.id)}/grant`, auth, {
-    method: 'POST', body: JSON.stringify({ scopes: app.required_scopes || [] }),
+    method: 'POST', body: JSON.stringify({ scopes: app.required_scopes || [], storeIds }),
   });
 }
 
