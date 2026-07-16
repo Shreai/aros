@@ -4,7 +4,7 @@ import { EdgeProvisioningService, type EdgeDeviceView, type EdgeProvisioningRepo
 class Repository implements EdgeProvisioningRepository {
   stores = new Set(['tenant-a:store-a', 'tenant-b:store-b']);
   connectors = new Set(['tenant-a:store-a:connector-a']);
-  activations: Array<{tenantId:string;storeId:string;connectorId?:string;codeHash:string;expiresAt:string}> = [];
+  activations: Array<{tenantId:string;storeId:string;connectorId?:string;codeHash:string;expiresAt:string;provider:string}> = [];
   devices: Array<EdgeDeviceView & {tenantId:string}> = [];
   async storeExists(tenantId:string, storeId:string) { return this.stores.has(`${tenantId}:${storeId}`); }
   async connectorExists(tenantId:string, storeId:string, connectorId:string) { return this.connectors.has(`${tenantId}:${storeId}:${connectorId}`); }
@@ -27,6 +27,13 @@ describe('EdgeProvisioningService', () => {
     await expect(service.createActivationCode({...owner,role:'member'},{storeId:'store-a'})).rejects.toThrow('EDGE_FORBIDDEN');
     await expect(service.createActivationCode(owner,{storeId:'store-b'})).rejects.toThrow('EDGE_STORE_NOT_FOUND');
     await expect(service.createActivationCode(owner,{storeId:'store-a',connectorId:'other'})).rejects.toThrow('EDGE_CONNECTOR_NOT_FOUND');
+  });
+  it('provisions an AUM runtime without pretending it is a POS connector', async () => {
+    const repo=new Repository(); const service=new EdgeProvisioningService(repo);
+    const result=await service.createActivationCode(owner,{storeId:'store-a',nodeKind:'aum'});
+    expect(result.provider).toBe('aum-node');
+    expect(repo.activations[0].provider).toBe('aum-node');
+    await expect(service.createActivationCode(owner,{storeId:'store-a',nodeKind:'aum',connectorId:'connector-a'})).rejects.toThrow('EDGE_INVALID_NODE_KIND');
   });
   it('lists and summarizes devices only inside the authenticated tenant', async () => {
     const repo=new Repository();

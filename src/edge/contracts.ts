@@ -42,6 +42,11 @@ export interface HeartbeatRequest {
   lastErrorCategory?: string;
   commanderVersion?: string;
   capabilities: string[];
+  runtimeKind?: 'connector' | 'aum';
+  runtimeReachable?: boolean;
+  localModels?: string[];
+  tools?: string[];
+  skills?: string[];
 }
 
 export interface EdgeEvent {
@@ -83,7 +88,12 @@ export function validateHeartbeat(value: unknown): value is HeartbeatRequest {
     && typeof value.commanderReachable === 'boolean'
     && Number.isInteger(value.queueDepth) && Number(value.queueDepth) >= 0
     && Number.isFinite(value.diskUsageBytes) && Number(value.diskUsageBytes) >= 0
-    && Array.isArray(value.capabilities) && value.capabilities.every(isNonEmpty);
+    && Array.isArray(value.capabilities) && value.capabilities.every(isNonEmpty)
+    && (value.runtimeKind === undefined || value.runtimeKind === 'connector' || value.runtimeKind === 'aum')
+    && (value.runtimeReachable === undefined || typeof value.runtimeReachable === 'boolean')
+    && (value.localModels === undefined || (Array.isArray(value.localModels) && value.localModels.every(isNonEmpty)))
+    && (value.tools === undefined || (Array.isArray(value.tools) && value.tools.every(isNonEmpty)))
+    && (value.skills === undefined || (Array.isArray(value.skills) && value.skills.every(isNonEmpty)));
 }
 
 export function validateEventBatch(value: unknown): value is EventBatchRequest {

@@ -14,10 +14,10 @@ export class SupabaseEdgeProvisioningRepository implements EdgeProvisioningRepos
     if (error) throw error;
     return Boolean(data);
   }
-  async createActivation(input: { tenantId:string; storeId:string; connectorId?:string; codeHash:string; expiresAt:string }) {
+  async createActivation(input: { tenantId:string; storeId:string; connectorId?:string; codeHash:string; expiresAt:string; provider:string }) {
     const { data, error } = await this.db.from('edge_activation_tokens').insert({
       tenant_id: input.tenantId, store_id: input.storeId, connector_id: input.connectorId ?? null,
-      provider: 'verifone', code_hash: input.codeHash, expires_at: input.expiresAt,
+      provider: input.provider, code_hash: input.codeHash, expires_at: input.expiresAt,
     }).select('id').single();
     if (error) throw error;
     return data.id as string;

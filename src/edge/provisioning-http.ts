@@ -17,12 +17,14 @@ export async function handleEdgeProvisioningRequest(
   try {
     if (pathname === '/api/edge/activation-codes' && req.method === 'POST') {
       const input = await body(req);
-      if (typeof input.storeId !== 'string' || (input.connectorId !== undefined && typeof input.connectorId !== 'string')) {
+      if (typeof input.storeId !== 'string' || (input.connectorId !== undefined && typeof input.connectorId !== 'string')
+        || (input.nodeKind !== undefined && input.nodeKind !== 'connector' && input.nodeKind !== 'aum')) {
         reply(res, 400, { error: 'invalid_activation_request' }); return true;
       }
       reply(res, 201, await service.createActivationCode(auth, {
         storeId: input.storeId, connectorId: input.connectorId as string | undefined,
         expiresInMinutes: input.expiresInMinutes as number | undefined,
+        nodeKind: input.nodeKind as 'connector' | 'aum' | undefined,
       })); return true;
     }
     if (pathname === '/api/edge/devices' && req.method === 'GET') {
@@ -41,6 +43,7 @@ export async function handleEdgeProvisioningRequest(
     if (message === 'EDGE_FORBIDDEN') reply(res, 403, { error: 'insufficient_role' });
     else if (message === 'EDGE_STORE_NOT_FOUND' || message === 'EDGE_CONNECTOR_NOT_FOUND') reply(res, 404, { error: 'resource_not_found' });
     else if (message === 'EDGE_INVALID_EXPIRY') reply(res, 400, { error: 'invalid_expiry' });
+    else if (message === 'EDGE_INVALID_NODE_KIND') reply(res, 400, { error: 'invalid_node_kind' });
     else if (message === 'BODY_TOO_LARGE') reply(res, 413, { error: 'payload_too_large' });
     else if (error instanceof SyntaxError) reply(res, 400, { error: 'invalid_json' });
     else reply(res, 500, { error: 'edge_provisioning_failure' });

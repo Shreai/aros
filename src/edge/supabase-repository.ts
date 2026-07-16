@@ -32,7 +32,7 @@ export class SupabaseEdgeRepository implements EdgeRepository {
     });
     if (error) throw error;
     await this.db.from('edge_devices').update({
-      last_heartbeat_at: new Date().toISOString(), status: heartbeat.commanderReachable ? 'online' : 'degraded',
+      last_heartbeat_at: new Date().toISOString(), status: (heartbeat.runtimeReachable ?? heartbeat.commanderReachable) ? 'online' : 'degraded',
       service_version: heartbeat.serviceVersion, connector_version: heartbeat.connectorVersion,
     }).eq('id', device.deviceId);
   }

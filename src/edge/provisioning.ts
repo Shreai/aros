@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { hashSecret } from './service.js';
 
 export interface ProvisioningAuth { tenantId: string; userId: string; role: string }
-export interface ActivationCodeInput { storeId: string; connectorId?: string; expiresInMinutes?: number }
+export type EdgeNodeKind = 'connector' | 'aum';
+export interface ActivationCodeInput { storeId: string; connectorId?: string; expiresInMinutes?: number; nodeKind?: EdgeNodeKind }
 export interface EdgeDeviceView {
   id: string; storeId: string; connectorId: string | null; provider: string; machineId: string;
   deviceName: string; operatingSystem: string | null; architecture: string | null;
@@ -13,7 +14,7 @@ export interface EdgeDeviceView {
 export interface EdgeProvisioningRepository {
   storeExists(tenantId: string, storeId: string): Promise<boolean>;
   connectorExists(tenantId: string, storeId: string, connectorId: string): Promise<boolean>;
-  createActivation(input: { tenantId: string; storeId: string; connectorId?: string; codeHash: string; expiresAt: string }): Promise<string>;
+  createActivation(input: { tenantId: string; storeId: string; connectorId?: string; codeHash: string; expiresAt: string; provider: string }): Promise<string>;
   listDevices(tenantId: string, storeId?: string): Promise<EdgeDeviceView[]>;
   hasUsableActivation(tenantId: string, storeId: string): Promise<boolean>;
 }
@@ -27,6 +28,8 @@ export class EdgeProvisioningService {
   async createActivationCode(auth: ProvisioningAuth, input: ActivationCodeInput) {
     if (!MANAGER_ROLES.has(auth.role)) throw new Error('EDGE_FORBIDDEN');
     if (!await this.repository.storeExists(auth.tenantId, input.storeId)) throw new Error('EDGE_STORE_NOT_FOUND');
+    const nodeKind = input.nodeKind ?? 'connector';
+    if (input.connectorId && nodeKind !== 'connector') throw new Error('EDGE_INVALID_NODE_KIND');
     if (input.connectorId && !await this.repository.connectorExists(auth.tenantId, input.storeId, input.connectorId)) {
       throw new Error('EDGE_CONNECTOR_NOT_FOUND');
     }
@@ -36,9 +39,9 @@ export class EdgeProvisioningService {
     const expiresAt = new Date(Date.now() + expiresInMinutes * 60_000).toISOString();
     const id = await this.repository.createActivation({
       tenantId: auth.tenantId, storeId: input.storeId, connectorId: input.connectorId,
-      codeHash: hashSecret(activationCode), expiresAt,
+      codeHash: hashSecret(activationCode), expiresAt, provider: nodeKind === 'aum' ? 'aum-node' : 'verifone',
     });
-    return { id, activationCode, expiresAt, storeId: input.storeId, provider: 'verifone' as const };
+    return { id, activationCode, expiresAt, storeId: input.storeId, provider: nodeKind === 'aum' ? 'aum-node' as const : 'verifone' as const };
   }
 
   listDevices(auth: ProvisioningAuth, storeId?: string) {
