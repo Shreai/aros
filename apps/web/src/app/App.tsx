@@ -52,11 +52,11 @@ function AppContent() {
     return <AppShell />;
   }
 
-  // Opt-in cutover flag: ?redesign=1 turns the chat-first shell on for this
-  // browser (authenticated users); ?redesign=0 reverts. Persisted, reversible.
+  // The chat-first shell is now the authenticated default. Keep a reversible
+  // per-browser escape hatch while the legacy shell is still in the bundle.
   const redesignParam = new URLSearchParams(window.location.search).get('redesign');
-  if (redesignParam === '1') { try { localStorage.setItem('aros-shell', '1'); } catch { /* ignore */ } }
-  else if (redesignParam === '0') { try { localStorage.removeItem('aros-shell'); } catch { /* ignore */ } }
+  if (redesignParam === '1') { try { localStorage.removeItem('aros-shell-legacy'); } catch { /* ignore */ } }
+  else if (redesignParam === '0') { try { localStorage.setItem('aros-shell-legacy', '1'); } catch { /* ignore */ } }
 
   if (centralIdentityOnly && path !== '/login' && path !== '/signup') {
     const authorize = path === '/oauth/authorize' ? `${path}${window.location.search}` : null;
@@ -171,11 +171,11 @@ function AuthenticatedRoutes({ path, isAdmin, onboarded }: { path: string; isAdm
     return null;
   }
 
-  // Opt-in chat-first redesign shell (set via the ?redesign flag in AppContent).
-  // Off by default; renders the real app with the live auth session.
-  let redesignShell = false;
-  try { redesignShell = localStorage.getItem('aros-shell') === '1'; } catch { /* ignore */ }
-  if (redesignShell) return <AppShell />;
+  // New themed shell is the default for every onboarded authenticated route.
+  // `?redesign=0` temporarily restores the legacy UI on this browser.
+  let legacyShell = false;
+  try { legacyShell = localStorage.getItem('aros-shell-legacy') === '1'; } catch { /* ignore */ }
+  if (!legacyShell) return <AppShell />;
 
   // Admin panel -> marketplace admin
   if (path.startsWith('/admin') && isAdmin) {
