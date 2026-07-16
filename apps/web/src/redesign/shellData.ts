@@ -5,7 +5,7 @@
 // swap the static arrays for live fetches at cutover.
 
 export type SectionKey =
-  | 'chat' | 'stores' | 'apps' | 'skills' | 'agents'
+  | 'chat' | 'stores' | 'marketplace' | 'apps' | 'connectors' | 'plugins' | 'skills' | 'agents'
   | 'models' | 'permissions' | 'health' | 'team' | 'billing' | 'usage' | 'settings';
 
 export interface NavItem { key: SectionKey; label: string; glyph: string; count?: number; }
@@ -13,7 +13,10 @@ export interface NavItem { key: SectionKey; label: string; glyph: string; count?
 export const PRIMARY_NAV: NavItem[] = [
   { key: 'chat', label: 'Chat', glyph: 'C' },
   { key: 'stores', label: 'Stores', glyph: 'St' },
+  { key: 'marketplace', label: 'Marketplace', glyph: 'Mk' },
   { key: 'apps', label: 'Apps', glyph: 'Ap' },
+  { key: 'connectors', label: 'Connectors', glyph: 'Co' },
+  { key: 'plugins', label: 'Plugins', glyph: 'Pl' },
   { key: 'skills', label: 'Skills', glyph: 'Sk', count: 5 },
   { key: 'agents', label: 'Agents', glyph: 'Ag', count: 5 },
   { key: 'models', label: 'Models', glyph: 'M' },
@@ -93,6 +96,9 @@ export interface SectionSpec {
 const s = (v: Status, label: string): [Status, string] => [v, label];
 
 export const SECTIONS: Record<Exclude<SectionKey, 'chat'>, SectionSpec> = {
+  marketplace: { eyebrow: 'Marketplace', lead: 'Browse apps, connectors, plugins, skills, and agents.', rows: [] },
+  connectors: { eyebrow: 'Activated connectors', lead: 'Connectors enabled for this workspace.', rows: [] },
+  plugins: { eyebrow: 'Activated plugins', lead: 'Plugins enabled for this workspace.', rows: [] },
   skills: {
     eyebrow: 'Shreai router', primaryCta: 'Add skill',
     lead: 'Versioned, reusable procedures your agents invoke through policy-controlled tools. Turn one on and Shre can call it in chat immediately — write actions always stay behind an approval gate.',
@@ -212,7 +218,7 @@ export const SECTIONS: Record<Exclude<SectionKey, 'chat'>, SectionSpec> = {
 // `type` + field `key`s match the real connectors API (POST /api/connectors:
 // { type, name, config, secrets }) — see pages/connect/ConnectStorePage + the
 // backend rapidrms-api / verifone connectors.
-export interface WizField { key: string; label: string; ph: string; secret?: boolean; }
+export interface WizField { key: string; label: string; ph: string; secret?: boolean; optional?: boolean; }
 export interface PosProvider {
   id: string; type: string; name: string; mark: string; desc: string; tag?: string;
   kind: 'api' | 'tunnel'; blurb: string; fields: WizField[];
@@ -233,6 +239,8 @@ export const POS_PROVIDERS: PosProvider[] = [
     desc: 'Fuel controller & forecourt. Secure tunnel to the site controller.',
     blurb: 'Enter the Commander’s LAN address and its CGI service credentials. Traffic stays on an encrypted tunnel to the site controller — nothing is exposed publicly.',
     fields: [
+      { key: 'storeName', label: 'Store name', ph: 'Main Street Store' },
+      { key: 'storeNumber', label: 'Store #', ph: 'Optional location number', optional: true },
       { key: 'commanderIp', label: 'Commander IP', ph: '192.168.31.11' },
       { key: 'username', label: 'CGI username', ph: 'Commander username' },
       { key: 'password', label: 'Password', ph: '••••••••', secret: true },
@@ -242,7 +250,7 @@ export const POS_PROVIDERS: PosProvider[] = [
 export const STORES_SCOPE = ['Main St', 'Oak Ave', '3rd St Express', 'Harbor', 'Elm St Express'];
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
-  chat: 'Concierge', stores: 'Stores', apps: 'Apps', skills: 'Skills', agents: 'Agents',
+  chat: 'Concierge', stores: 'Stores', marketplace: 'Marketplace', apps: 'Apps', connectors: 'Connectors', plugins: 'Plugins', skills: 'Skills', agents: 'Agents',
   models: 'Models', permissions: 'Permissions', health: 'Connection Health',
   team: 'Team', billing: 'Billing', usage: 'Usage', settings: 'Settings',
 };

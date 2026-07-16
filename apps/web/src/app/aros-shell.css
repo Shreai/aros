@@ -215,6 +215,16 @@
   box-shadow: var(--shadow-btn); transition: background 0.15s, box-shadow 0.15s;
 }
 .rsx-panel__cta:hover { background: var(--accent-2); box-shadow: var(--shadow-btn-hover); }
+.rsx-marketplace-layout { display: flex; flex-direction: column; gap: 22px; }
+.rsx-marketplace-layout .rsx-panel__head,
+.rsx-marketplace-layout .rsx-form { margin: 0; }
+.rsx-marketplace-layout .rsx2-tabs { align-self: flex-start; }
+.rsx-section-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.rsx-marketplace-layout { display: flex; flex-direction: column; gap: 22px; }
+.rsx-marketplace-layout .rsx-panel__head,
+.rsx-marketplace-layout .rsx-form { margin: 0; }
+.rsx-marketplace-layout .rsx2-tabs { align-self: flex-start; }
+.rsx-section-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 
 .rsx-stats { display: flex; gap: 12px; margin-bottom: 20px; }
 .rsx-stat {
@@ -256,6 +266,12 @@
 .rsx-row__btn:hover { background: var(--surface-2); border-color: var(--accent); }
 
 .rsx-form { display: flex; flex-direction: column; gap: 14px; max-width: 460px; }
+.rsx-panel > .rsx-form { margin-bottom: 20px; }
+.rsx-search-block { display: block; max-width: 460px; margin-bottom: 20px; }
+.rsx-edge-code { margin: 18px 0; padding: 18px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); text-align: center; font: 700 24px/1.2 'JetBrains Mono', monospace; letter-spacing: .12em; }
+.rsx-edge-steps { margin: 0 0 18px; padding-left: 22px; color: var(--ink-2); font-size: 13.5px; line-height: 1.7; }
+.aros-model-picker { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--ink-3); font-size: 11.5px; font-weight: 600; }
+.aros-model-picker select { min-width: 220px; max-width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); padding: 7px 9px; font: 12px inherit; }
 .rsx-form__field { display: flex; flex-direction: column; gap: 6px; }
 .rsx-form__label { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
 .rsx-form__input {
@@ -299,6 +315,10 @@
 .rsx-modal__body { padding: 18px 22px; overflow-y: auto; }
 .rsx-modal__h { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
 .rsx-modal__p { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; margin: 0 0 16px; }
+.rsx-secret { position: relative; display: block; }
+.rsx-secret .rsx-form__input, .rsx-secret > input { padding-right: 58px; }
+.rsx-secret__toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--ink-2); font: 600 12px inherit; cursor: pointer; padding: 6px; }
+.rsx-secret__toggle:hover, .rsx-secret__toggle:focus-visible { color: var(--ink); }
 
 .rsx-prov { display: flex; flex-direction: column; gap: 10px; }
 .rsx-prov__card {
