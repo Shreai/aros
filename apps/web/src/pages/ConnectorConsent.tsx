@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useWhitelabel } from '../whitelabel/WhitelabelProvider';
 
 const API_BASE = (window as any).__AROS_API_URL__
   || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
@@ -26,6 +27,11 @@ const SCOPE_LABELS: Record<string, string> = {
  */
 export function ConnectorConsent() {
   const { session, tenant, user } = useAuth();
+  // Same white-label config the rest of the app uses — so a custom-domain
+  // connector shows the customer's brand/logo/colors, not a separate theme.
+  const { config } = useWhitelabel();
+  const brandName = config.brand.name;
+  const brandColor = config.theme.colors.primary || '#3b5bdb';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -94,11 +100,11 @@ export function ConnectorConsent() {
   return (
     <div style={styles.wrapper}>
       <div style={styles.card}>
-        <div style={styles.logo}>AROS</div>
+        <div style={styles.logo}>{brandName}</div>
         <h2 style={styles.title}>{clientName} wants to connect</h2>
         <p style={styles.desc}>
           Allow <strong>{clientName}</strong> to work with your store
-          {tenant?.name ? <> — <strong>{tenant.name}</strong></> : ''} through AROS.
+          {tenant?.name ? <> — <strong>{tenant.name}</strong></> : ''} through {brandName}.
           You're signed in as {user?.email}.
         </p>
 
@@ -116,13 +122,13 @@ export function ConnectorConsent() {
 
         <p style={styles.fine}>
           Your POS credentials never leave your store. You can revoke access anytime
-          from your AROS dashboard.
+          from your {brandName} dashboard.
         </p>
 
         {error && <div style={styles.error}>{error}</div>}
 
         <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-          <button type="button" onClick={allow} disabled={loading} style={{ ...styles.button, flex: 1 }}>
+          <button type="button" onClick={allow} disabled={loading} style={{ ...styles.button, flex: 1, background: brandColor }}>
             {loading ? 'Connecting…' : 'Allow'}
           </button>
           <button type="button" onClick={denyAndReturn} disabled={loading} style={{ ...styles.button, flex: 1, background: '#f3f4f6', color: '#374151' }}>
