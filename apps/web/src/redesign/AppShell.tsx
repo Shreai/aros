@@ -5,7 +5,7 @@ import { SectionPanel } from './SectionPanel';
 import { IntelligencePage } from './pages/intelligence';
 import { StoresPage, AppsPage } from './pages/connections';
 import {
-  BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage,
+  BillingPage, UsagePage, TeamPage, SettingsPage, PermissionsPage, ConnectionHealthPage, DevicesPage,
 } from './pages/admin';
 import { ConnectWizard } from './ConnectWizard';
 import { Canvas } from './Canvas';
@@ -25,14 +25,14 @@ const PlusIcon = () => (<svg width="15" height="15" viewBox="0 0 24 24" fill="no
 
 const PATH_TO_SECTION: Record<string, Exclude<SectionKey, 'chat'>> = {
   '/stores': 'stores', '/apps': 'apps', '/skills': 'skills', '/agents': 'agents',
-  '/models': 'models', '/connection-health': 'health', '/settings': 'settings',
+  '/models': 'models', '/computers': 'devices', '/connection-health': 'health', '/settings': 'settings',
   '/permissions': 'permissions',
   '/profile': 'settings', '/billing': 'billing', '/costs': 'usage', '/users': 'team',
   '/workspace': 'settings', '/marketplace': 'apps', '/channels': 'apps',
 };
 const SECTION_TO_PATH: Partial<Record<SectionKey, string>> = {
   stores: '/stores', apps: '/apps', skills: '/skills', agents: '/agents',
-  models: '/models', health: '/connection-health', settings: '/settings',
+  models: '/models', devices: '/computers', health: '/connection-health', settings: '/settings',
   billing: '/billing', usage: '/costs', team: '/users', permissions: '/permissions',
 };
 
@@ -138,6 +138,7 @@ export function AppShell() {
     if (section === 'apps') return <AppsPage />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
+    if (section === 'devices') return <DevicesPage />;
     if (section === 'team') return <TeamPage />;
     if (section === 'billing') return <BillingPage />;
     if (section === 'usage') return <UsagePage />;
