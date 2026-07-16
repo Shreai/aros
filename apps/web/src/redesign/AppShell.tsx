@@ -74,23 +74,7 @@ export function AppShell() {
     <div className="rsx2-shell" data-chat={mode === 'chat' ? 'open' : 'closed'} data-mode={mode}>
       <header className="rsx2-top">
         <button ref={chatToggleRef} className={`rsx2-icon ${mode === 'chat' ? 'is-on' : ''}`} onClick={toggleChat} aria-label="Chat" aria-expanded={mode === 'chat'} title="Chat"><ChatIcon /></button>
-        <div className="rsx2-top__menu">
-          <button className={`rsx2-icon ${menuOpen ? 'is-on' : ''}`} onClick={() => setMenuOpen(o => !o)} aria-label="Menu" title="Menu"><MenuIcon /></button>
-          {menuOpen && (
-            <>
-              <div className="rsx2-menuscrim" onClick={() => setMenuOpen(false)} />
-              <div className="rsx2-dropdown">
-                <button className="rsx2-dropdown__item" onClick={() => goSection('chat')}><span className="rsx-nav__glyph">C</span>Chat</button>
-                {PRIMARY_NAV.filter(i => i.key !== 'chat').map(item => (
-                  <button key={item.key} className="rsx2-dropdown__item" onClick={() => goSection(item.key)}>
-                    <span className="rsx-nav__glyph">{item.glyph}</span>{item.label}
-                    {item.count != null && <span className="rsx-nav__count" style={{ marginLeft: 'auto' }}>{item.count}</span>}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+        <button className={`rsx2-icon ${menuOpen ? 'is-on' : ''}`} onClick={() => setMenuOpen(o => !o)} aria-label="Menu" aria-expanded={menuOpen} title="Menu"><MenuIcon /></button>
         <button className="rsx2-brand" onClick={() => setMode('home')} title="Home">
           <span className="aros-side__mark">{b.mark}</span><span className="rsx2-top__title">{title}</span>
         </button>
@@ -145,6 +129,29 @@ export function AppShell() {
               <Canvas />
             </div>
           </div>
+        </div>
+      )}
+
+      {menuOpen && (
+        <div className="rsx2-scrim rsx2-scrim--left" onClick={() => setMenuOpen(false)}>
+          <aside className="rsx2-drawer" onClick={e => e.stopPropagation()}>
+            <div className="rsx2-drawer__brand">
+              <span className="aros-side__mark">{b.mark}</span>
+              <div><div className="aros-side__brandname">{b.product}</div><div className="aros-side__brandby">{b.byline}</div></div>
+            </div>
+            <div className="rsx2-nav__list">
+              <button className="rsx-nav" aria-current={mode === 'home'} onClick={() => { setMode('home'); setMenuOpen(false); }}>
+                <span className="rsx-nav__glyph">⌂</span><span style={{ flex: 1 }}>Home</span>
+              </button>
+              <button className="rsx-nav" aria-current={mode === 'chat'} onClick={() => goSection('chat')}>
+                <span className="rsx-nav__glyph">C</span><span style={{ flex: 1 }}>Chat</span>
+              </button>
+              {PRIMARY_NAV.filter(i => i.key !== 'chat').map(item => (
+                <NavRow key={item.key} item={item} active={mode === 'app' && section === item.key} onClick={() => goSection(item.key)} />
+              ))}
+            </div>
+            <div className="rsx2-nav__foot"><UserRow onClick={() => { setMenuOpen(false); setProfileOpen(true); }} /></div>
+          </aside>
         </div>
       )}
 
