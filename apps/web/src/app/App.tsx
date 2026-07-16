@@ -52,6 +52,12 @@ function AppContent() {
     return <AppShell />;
   }
 
+  // Opt-in cutover flag: ?redesign=1 turns the chat-first shell on for this
+  // browser (authenticated users); ?redesign=0 reverts. Persisted, reversible.
+  const redesignParam = new URLSearchParams(window.location.search).get('redesign');
+  if (redesignParam === '1') { try { localStorage.setItem('aros-shell', '1'); } catch { /* ignore */ } }
+  else if (redesignParam === '0') { try { localStorage.removeItem('aros-shell'); } catch { /* ignore */ } }
+
   if (centralIdentityOnly && path !== '/login' && path !== '/signup') {
     const authorize = path === '/oauth/authorize' ? `${path}${window.location.search}` : null;
     window.location.replace(authorize ? `/login?return_to=${encodeURIComponent(authorize)}` : '/login');
@@ -164,6 +170,12 @@ function AuthenticatedRoutes({ path, isAdmin, onboarded }: { path: string; isAdm
     window.location.href = '/start';
     return null;
   }
+
+  // Opt-in chat-first redesign shell (set via the ?redesign flag in AppContent).
+  // Off by default; renders the real app with the live auth session.
+  let redesignShell = false;
+  try { redesignShell = localStorage.getItem('aros-shell') === '1'; } catch { /* ignore */ }
+  if (redesignShell) return <AppShell />;
 
   // Admin panel -> marketplace admin
   if (path.startsWith('/admin') && isAdmin) {

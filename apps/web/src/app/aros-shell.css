@@ -131,6 +131,11 @@
 .aros-msg--me .aros-msg__bubble { background: var(--inv); color: var(--inv-ink); border-color: var(--inv); box-shadow: none; }
 .aros-msg--me .aros-msg__av { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--line); }
 .aros-msg__meta { font-size: 11px; color: var(--ink-3); margin-top: 7px; font-family: 'JetBrains Mono', monospace; }
+.aros-msg__typing { display: inline-flex; gap: 5px; align-items: center; }
+.aros-msg__typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); animation: aros-typing 1.2s infinite ease-in-out; }
+.aros-msg__typing span:nth-child(2) { animation-delay: 0.15s; }
+.aros-msg__typing span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes aros-typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 
 .aros-composer { border-top: 1px solid var(--line); padding: 16px 26px 22px; background: var(--bg); }
 .aros-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }

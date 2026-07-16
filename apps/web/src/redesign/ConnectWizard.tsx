@@ -1,24 +1,36 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { POS_PROVIDERS, STORES_SCOPE, type PosProvider } from './shellData';
 
 const STEP_LABELS = ['PROVIDER', 'CONNECT', 'SCOPE', 'REVIEW'];
+const API_BASE = (window as any).__AROS_API_URL__
+  || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
 
 /**
  * Connect-a-register wizard (4 steps): pick provider → credentials → choose
  * stores & access → review. POS scoped to RapidRMS + Verifone Commander.
- * Preview closes on Connect; wired build POSTs to the connectors API and kicks
- * off store discovery.
+ * On connect it POSTs the real connectors API ({type,name,config,secrets}) then
+ * runs the connection test — the same contract as ConnectStorePage.
  */
 export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone: (name: string) => void }) {
+  const { session, tenant } = useAuth();
   const [step, setStep] = useState(1);
   const [providerId, setProviderId] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [stores, setStores] = useState<string[]>(STORES_SCOPE);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const provider = POS_PROVIDERS.find(p => p.id === providerId) || null;
+
+  const authHeaders = useCallback((): Record<string, string> => ({
+    'Content-Type': 'application/json',
+    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+    ...(tenant?.id ? { 'x-aros-tenant-id': tenant.id } : {}),
+  }), [session, tenant]);
 
   const canNext =
     step === 1 ? !!provider :
-    step === 2 ? !!provider && provider.fields.every(f => (values[f.label] || '').trim().length > 0) :
+    step === 2 ? !!provider && provider.fields.every(f => (values[f.key] || '').trim().length > 0) :
     step === 3 ? stores.length > 0 :
     true;
 
@@ -26,9 +38,45 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
     setStores(all => all.includes(name) ? all.filter(x => x !== name) : [...all, name]);
   }
 
+  async function submit() {
+    if (!provider) return;
+    setBusy(true); setError('');
+    try {
+      const config: Record<string, unknown> = { stores };
+      const secrets: Record<string, string> = {};
+      for (const f of provider.fields) {
+        const v = (values[f.key] || '').trim();
+        if (f.secret) secrets[f.key] = v; else config[f.key] = v;
+      }
+      const saveRes = await fetch(`${API_BASE}/api/connectors`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          type: provider.type,
+          name: `${provider.name} — ${tenant?.name || 'Five Points'}`,
+          config,
+          secrets,
+        }),
+      });
+      const saved = await saveRes.json().catch(() => ({}));
+      if (!saveRes.ok) throw new Error(saved.error || `Could not save connector (HTTP ${saveRes.status})`);
+      // Fire the connection test; non-fatal if it can't confirm yet.
+      if (saved.connector?.id) {
+        await fetch(`${API_BASE}/api/connectors/test`, {
+          method: 'POST', headers: authHeaders(), body: JSON.stringify({ id: saved.connector.id }),
+        }).catch(() => {});
+      }
+      onDone(provider.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function next() {
     if (step < 4) { setStep(step + 1); return; }
-    onDone(provider!.name);
+    void submit();
   }
 
   return (
@@ -71,14 +119,14 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
               <p className="rsx-modal__p">{provider.blurb}</p>
               <div className="rsx-form">
                 {provider.fields.map(f => (
-                  <label key={f.label} className="rsx-form__field">
+                  <label key={f.key} className="rsx-form__field">
                     <span className="rsx-form__label">{f.label}</span>
                     <input
                       className="rsx-form__input"
                       type={f.secret ? 'password' : 'text'}
                       placeholder={f.ph}
-                      value={values[f.label] || ''}
-                      onChange={e => setValues(v => ({ ...v, [f.label]: e.target.value }))}
+                      value={values[f.key] || ''}
+                      onChange={e => setValues(v => ({ ...v, [f.key]: e.target.value }))}
                     />
                   </label>
                 ))}
@@ -117,16 +165,17 @@ export function ConnectWizard({ onClose, onDone }: { onClose: () => void; onDone
                 <ReviewRow label="Stores" value={stores.length === STORES_SCOPE.length ? `All ${stores.length}` : stores.join(', ') || 'None'} />
                 <ReviewRow label="Access" value="Read + approval-gated writes" />
               </div>
+              {error && <div className="aros-auth__error" style={{ marginTop: 14 }}>{error}</div>}
             </>
           )}
         </div>
 
         <div className="rsx-modal__foot">
           {step > 1
-            ? <button className="rsx-modal__back" onClick={() => setStep(step - 1)}>← Back</button>
+            ? <button className="rsx-modal__back" onClick={() => setStep(step - 1)} disabled={busy}>← Back</button>
             : <span />}
-          <button className="rsx-modal__next" disabled={!canNext} onClick={next}>
-            {step < 4 ? 'Continue' : `Connect ${provider?.name || ''}`}
+          <button className="rsx-modal__next" disabled={!canNext || busy} onClick={next}>
+            {busy ? 'Connecting…' : step < 4 ? 'Continue' : `Connect ${provider?.name || ''}`}
           </button>
         </div>
       </div>
