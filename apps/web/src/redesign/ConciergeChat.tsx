@@ -46,6 +46,7 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [activeAgents, setActiveAgents] = useState<ActiveAgent[]>([]);
+  const [activeModel, setActiveModel] = useState('auto');
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -64,6 +65,13 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
         .filter((item: any) => item?.status === 'active' && item?.name)
         .map((item: any) => ({ name: String(item.name), capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : [] }))))
       .catch(() => setActiveAgents([]));
+  }, [demo, session?.access_token, tenant?.id]);
+  useEffect(() => {
+    if (demo || !session?.access_token) return;
+    fetch(`${API_BASE}/api/settings/models`, { headers: { Authorization: `Bearer ${session.access_token}`, ...(tenant?.id ? { 'x-aros-tenant-id': tenant.id } : {}) } })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => { const selected = (data?.providers || []).find((item: any) => item?.isActive); if (selected?.model) setActiveModel(String(selected.model)); })
+      .catch(() => setActiveModel('auto'));
   }, [demo, session?.access_token, tenant?.id]);
 
   async function send(text: string) {
@@ -98,6 +106,7 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
             ...nextMessages.map(message => ({ role: message.from === 'me' ? 'user' : 'assistant', content: message.text })),
           ],
           stream: false,
+          model: activeModel,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

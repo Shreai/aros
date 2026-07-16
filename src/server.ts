@@ -2126,6 +2126,52 @@ async function handleWorkspaceCapabilities(req: IncomingMessage, res: ServerResp
   json(res, 200, { tenantId, apps: grants || [], resources: resources || [], tools, generatedAt: new Date().toISOString() });
 }
 
+function routerModelId(provider: string, model: string): string {
+  if (model.includes('/')) return model;
+  if (provider === 'aum') return model === 'shre-70b' ? 'aum/70b' : `aum/${model}`;
+  const prefix = provider === 'google' ? 'google' : provider;
+  return `${prefix}/${model}`;
+}
+
+async function handleModelSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const supabase = createSupabaseAdmin();
+  if (req.method === 'GET') {
+    const { data, error } = await supabase.from('tenant_resources').select('id,provider,name,status,config,health').eq('tenant_id', auth.tenantId).eq('kind', 'model').order('created_at');
+    if (error) return json(res, 500, { error: error.message });
+    const providers = (data || []).map(row => ({ id: row.id, provider: row.provider, label: row.name, model: row.config?.modelId, endpoint: row.config?.endpoint, isActive: row.status === 'active', status: row.status, verification: row.health }));
+    return json(res, 200, { providers, active: providers.find(provider => provider.isActive)?.id || null });
+  }
+  if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
+  const body = await parseJsonBody(req);
+  if (!body || !Array.isArray(body.providers)) return json(res, 400, { error: 'providers are required' });
+  const selected = body.providers.find((provider: Record<string, unknown>) => String(provider.id) === String(body.active)) || body.providers.find((provider: Record<string, unknown>) => provider.isActive === true);
+  if (!selected) return json(res, 400, { error: 'Select an active model provider' });
+  const provider = String(selected.provider || '').toLowerCase();
+  const model = String(selected.model || '').trim();
+  if (!['aum', 'ollama', 'anthropic', 'openai', 'google'].includes(provider) || !model) return json(res, 400, { error: 'Unsupported provider or model' });
+  const modelId = routerModelId(provider, model);
+  const apiKey = typeof selected.apiKey === 'string' ? selected.apiKey.trim() : '';
+  const credentialMode = apiKey ? 'api_key' : 'system_provider';
+  const routerResponse = await fetch(`${SHRE_ROUTER_URL}/v1/model-onboarding/profile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: req.headers.authorization || '', 'x-tenant-id': auth.tenantId, 'x-user-id': auth.userId },
+    body: JSON.stringify({ tenantId: auth.tenantId, userId: auth.userId, agentId: 'aros-agent', modelId, credentialMode, apiKey: apiKey || undefined, autoUpgrade: true }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await routerResponse.json().catch(() => ({})) as Record<string, unknown>;
+  const verified = routerResponse.ok && (result.verification as Record<string, unknown> | undefined)?.verified !== false;
+  const { error } = await supabase.from('tenant_resources').upsert({
+    tenant_id: auth.tenantId, kind: 'model', provider, name: String(selected.label || model), status: verified ? 'active' : 'failed',
+    capabilities: ['chat.completions', 'tools'], config: { modelId, endpoint: selected.endpoint || null, credentialMode },
+    health: { state: verified ? 'verified' : 'failed', checkedAt: new Date().toISOString(), detail: verified ? 'Provider verified by MIB router' : String(result.error || 'Provider verification failed') }, created_by: auth.userId,
+  }, { onConflict: 'tenant_id,kind,name' });
+  if (error) return json(res, 500, { error: error.message });
+  await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'model.provider.configured', resource: `model:${modelId}`, detail: { provider, modelId, credentialMode, verified }, ip: getClientIp(req) });
+  json(res, routerResponse.ok ? 200 : 409, verified ? { providers: [{ ...selected, apiKey: undefined, model: modelId, isActive: true }], active: selected.id, verification: result.verification } : { error: String(result.error || 'Model verification failed'), verification: result.verification });
+}
+
 const runningStoreSyncs = new Set<string>();
 const isoDate = (value: Date) => value.toISOString().slice(0, 10);
 const addDays = (value: string, days: number) => isoDate(new Date(Date.parse(`${value}T00:00:00Z`) + days * 86_400_000));
@@ -2830,6 +2876,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   }
   if (pathname === '/api/workspace/capabilities' && method === 'GET') {
     return handleWorkspaceCapabilities(req, res);
+  }
+  if (pathname === '/api/settings/models' && (method === 'GET' || method === 'POST')) {
+    return handleModelSettings(req, res);
   }
   if (pathname === '/api/store/sync' && (method === 'GET' || method === 'POST')) {
     return handleStoreSync(req, res);
