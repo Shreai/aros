@@ -17,6 +17,7 @@ import { Login } from '../pages/Login';
 import { Signup } from '../pages/Signup';
 import { StartChat } from '../pages/start/StartChat';
 import { ConnectStorePage } from '../pages/connect/ConnectStorePage';
+import { ConnectorConsent } from '../pages/ConnectorConsent';
 import { ConnectStoreBanner } from '../components/ConnectStoreBanner';
 import { ResetPassword } from '../pages/ResetPassword';
 import { VerifyEmail } from '../pages/VerifyEmail';
@@ -106,6 +107,18 @@ function AppContent() {
     return (
       <ProtectedRoute>
         <StartChat />
+      </ProtectedRoute>
+    );
+  }
+
+  // OAuth consent — the AI-connector authorization screen. When a user adds AROS
+  // to Claude/ChatGPT/Gemini, the connector's /oauth/authorize redirects here.
+  // ProtectedRoute reuses the SAME login as the web app (no onboarding gate), so
+  // connecting via an AI assistant is the same one consistent AROS experience.
+  if (path.startsWith('/authorize')) {
+    return (
+      <ProtectedRoute>
+        <ConnectorConsent />
       </ProtectedRoute>
     );
   }
