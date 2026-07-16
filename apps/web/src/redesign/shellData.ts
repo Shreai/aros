@@ -1,7 +1,8 @@
-// Demo data for the chat-first redesign preview. Mirrors the Claude Design
-// export (Five Points Market, RapidRMS connected, 5 stores). Section content is
-// placeholder until wired to real surfaces (Concierge → router /v1/chat;
-// Skills/Agents → CapabilityCatalog; Stores/Apps → ConnectionsHub).
+// Content for the chat-first redesign. Section data mirrors the app's real
+// catalogs (CapabilityCatalog skills/agents, ConnectionsHub POS/app providers,
+// AIModels providers, AdministrationPage members) so the redesigned panels show
+// the same things the current pages do — just in the new design and ready to
+// swap the static arrays for live fetches at cutover.
 
 export type SectionKey =
   | 'chat' | 'stores' | 'apps' | 'skills' | 'agents'
@@ -13,8 +14,8 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'chat', label: 'Chat', glyph: 'C' },
   { key: 'stores', label: 'Stores', glyph: 'St' },
   { key: 'apps', label: 'Apps', glyph: 'Ap' },
-  { key: 'skills', label: 'Skills', glyph: 'Sk', count: 6 },
-  { key: 'agents', label: 'Agents', glyph: 'Ag', count: 4 },
+  { key: 'skills', label: 'Skills', glyph: 'Sk', count: 5 },
+  { key: 'agents', label: 'Agents', glyph: 'Ag', count: 5 },
   { key: 'models', label: 'Models', glyph: 'M' },
   { key: 'permissions', label: 'Permissions', glyph: 'P' },
   { key: 'health', label: 'Connection Health', glyph: 'H' },
@@ -28,54 +29,159 @@ export const WORKSPACE_NAV: NavItem[] = [
 ];
 
 export const HEALTH = { healthy: 2, degraded: 1, down: 1 };
-
 export const USER = { name: 'Dana Reyes', role: 'Owner', workspace: 'Five Points', initials: 'DR' };
-
 export const ROLES = ['Owner', 'Admin', 'Member'] as const;
 
 export interface ChatMsg { from: 'shre' | 'me'; text: string; meta?: string; }
-
 export const CONCIERGE_SEED: ChatMsg[] = [
-  {
-    from: 'shre',
-    text: 'I’m Shre — your store concierge. Ask me anything, like “How were sales yesterday?” or “Which SKUs are running low?” You can connect a register whenever you’re ready. I’ll never block the chat on setup.',
-    meta: 'Shre · Local',
-  },
-  {
-    from: 'shre',
-    text: 'RapidRMS is connected — I can see all 5 stores and live sales are flowing. Ask me “How were sales yesterday?” whenever you’re ready.',
-    meta: 'Shre · Local',
-  },
+  { from: 'shre', text: 'I’m Shre — your store concierge. Ask me anything, like “How were sales yesterday?” or “Which SKUs are running low?” You can connect a register whenever you’re ready. I’ll never block the chat on setup.', meta: 'Shre · Local' },
+  { from: 'shre', text: 'RapidRMS is connected — I can see all 5 stores and live sales are flowing. Ask me “How were sales yesterday?” whenever you’re ready.', meta: 'Shre · Local' },
 ];
+export const SUGGESTIONS = ['How were sales yesterday?', 'Which SKUs are low?', 'Raise carton prices 3% at all stores'];
 
-export const SUGGESTIONS = [
-  'How were sales yesterday?',
-  'Which SKUs are low?',
-  'Raise carton prices 3% at all stores',
-];
+export type Status = 'on' | 'warn' | 'off';
+export interface Stat { value: string | number; label: string; }
+export interface Card { icon: string; title: string; desc: string; status: Status; tag: string; cta: string; }
+export interface Row { mark: string; title: string; sub: string; status: Status; statusLabel: string; action: string; }
+export interface FormField { label: string; value: string; type?: 'text' | 'select'; options?: string[]; }
 
-export interface CapabilityCard {
-  icon: string; title: string; desc: string; on: boolean; tag: string;
+export interface SectionSpec {
+  eyebrow: string;
+  lead: string;
+  primaryCta?: string;
+  stats?: Stat[];
+  cards?: Card[];
+  rows?: Row[];
+  form?: FormField[];
+  note?: { title: string; body: string };
 }
 
-export const SKILLS: CapabilityCard[] = [
-  { icon: '📊', title: 'Sales digest', desc: 'Daily sales, top movers, and anomalies across every store, pushed each morning.', on: true, tag: 'active' },
-  { icon: '📦', title: 'Low-stock watch', desc: 'Flags SKUs below reorder point and drafts a purchase order for your approval.', on: true, tag: 'active' },
-  { icon: '🏷️', title: 'Price change', desc: 'Applies price updates across selected stores — always behind an approval gate.', on: true, tag: 'active' },
-  { icon: '🧾', title: 'Invoice extract', desc: 'Reads supplier invoices and reconciles them against received inventory.', on: false, tag: 'available' },
-  { icon: '📈', title: 'Basket insights', desc: 'Surfaces attach-rate and basket-building opportunities from transaction data.', on: false, tag: 'available' },
-  { icon: '🗓️', title: 'Labor planner', desc: 'Suggests shift coverage from sales patterns and flags overtime risk.', on: false, tag: 'available' },
-];
+const s = (v: Status, label: string): [Status, string] => [v, label];
 
-export const AGENTS: CapabilityCard[] = [
-  { icon: '🛒', title: 'Store concierge', desc: 'The chat you’re talking to — answers questions and runs approved actions across stores.', on: true, tag: 'running' },
-  { icon: '🔁', title: 'Replenishment agent', desc: 'Monitors stock and proposes reorders overnight; hands off to you for sign-off.', on: true, tag: 'running' },
-  { icon: '💬', title: 'Support agent', desc: 'Answers customer questions on hours, products, and returns from your data.', on: true, tag: 'running' },
-  { icon: '🔎', title: 'Pricing analyst', desc: 'Watches margins and competitor moves, drafts price recommendations.', on: false, tag: 'paused' },
-];
+export const SECTIONS: Record<Exclude<SectionKey, 'chat'>, SectionSpec> = {
+  skills: {
+    eyebrow: 'Shreai router', primaryCta: 'Add skill',
+    lead: 'Versioned, reusable procedures your agents invoke through policy-controlled tools. Turn one on and Shre can call it in chat immediately — write actions always stay behind an approval gate.',
+    stats: [{ value: 5, label: 'Available' }, { value: 2, label: 'Active' }, { value: 3, label: 'Not configured' }],
+    cards: [
+      { icon: '📊', title: 'Daily Sales Summary', desc: 'Queries mapped POS stores and produces a cited summary each morning.', status: 'on', tag: 'Read only', cta: 'Configure' },
+      { icon: '📦', title: 'Inventory Reorder', desc: 'Builds reorder recommendations from stock velocity, drafts a PO for approval.', status: 'on', tag: 'Draft action', cta: 'Configure' },
+      { icon: '🏷️', title: 'Price Update', desc: 'Submits a POS price change across selected stores — after your approval.', status: 'off', tag: 'Write action', cta: 'Enable' },
+      { icon: '💬', title: 'Support Triage', desc: 'Classifies incoming tickets and drafts responses from your data.', status: 'off', tag: 'Draft action', cta: 'Enable' },
+      { icon: '🌙', title: 'Store Closeout', desc: 'Runs end-of-day checks and reports exceptions across every store.', status: 'off', tag: 'Workflow', cta: 'Enable' },
+    ],
+  },
+  agents: {
+    eyebrow: 'Shreai router', primaryCta: 'Create agent',
+    lead: 'Agents coordinate goals and invoke approved skills. Each one acts only within the scope you grant — talk to any of them from chat, or let them run in the background and report back.',
+    stats: [{ value: 5, label: 'Available' }, { value: 2, label: 'Running' }, { value: 3, label: 'Paused' }],
+    cards: [
+      { icon: '🛒', title: 'Store Operations Agent', desc: 'Monitors daily operations, exceptions, and store health across all locations.', status: 'on', tag: 'Operations', cta: 'Configure' },
+      { icon: '🔁', title: 'Inventory Agent', desc: 'Tracks stock and drafts replenishment actions overnight for your sign-off.', status: 'on', tag: 'Inventory', cta: 'Configure' },
+      { icon: '🔎', title: 'Pricing Agent', desc: 'Proposes approval-gated POS price changes from margin and competitor signals.', status: 'off', tag: 'Approval required', cta: 'Start' },
+      { icon: '🎧', title: 'Customer Support Agent', desc: 'Handles support questions using connected systems and your store data.', status: 'off', tag: 'Support', cta: 'Start' },
+      { icon: '📒', title: 'Finance Agent', desc: 'Reconciles POS and accounting activity, flags mismatches for review.', status: 'off', tag: 'Finance', cta: 'Start' },
+    ],
+  },
+  stores: {
+    eyebrow: 'Connections', primaryCta: 'Connect POS',
+    lead: 'Connect each POS account, discover its stores, and control exactly what Shre can read and change. Credentials are sealed in the Shreai vault.',
+    stats: [{ value: 1, label: 'Connected' }, { value: 5, label: 'Mapped stores' }, { value: 6, label: 'Providers' }],
+    rows: [
+      { mark: 'RA', title: 'RapidRMS', sub: 'Main St · Oak Ave · 3rd St Express · Harbor · Elm St Express', ...rowStatus(s('on', 'Connected')), action: 'Manage' },
+      { mark: 'VE', title: 'Verifone Commander', sub: 'Site controller · token expiring soon', ...rowStatus(s('warn', 'Needs attention')), action: 'Fix' },
+      { mark: 'CL', title: 'Clover', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'SQ', title: 'Square', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'NC', title: 'NCR', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'GI', title: 'Gilbarco Passport', sub: 'Not connected', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+    ],
+  },
+  apps: {
+    eyebrow: 'Connections', primaryCta: 'Connect app',
+    lead: 'Connect the apps Shre can read and act in — accounting, messaging, storage, and CRM. Map each account to a workspace or store.',
+    stats: [{ value: 0, label: 'Connected' }, { value: 14, label: 'Available' }, { value: 0, label: 'Mapped stores' }],
+    rows: [
+      { mark: 'QB', title: 'QuickBooks', sub: 'Accounting · reconcile POS to books', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'XE', title: 'Xero', sub: 'Accounting', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'SL', title: 'Slack', sub: 'Alerts and approval workflows', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'GM', title: 'Gmail', sub: 'Email · supplier and customer threads', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'HU', title: 'HubSpot', sub: 'CRM', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+      { mark: 'ZE', title: 'Zendesk', sub: 'Support tickets', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+    ],
+  },
+  models: {
+    eyebrow: 'Intelligence', primaryCta: 'Add provider',
+    lead: 'Choose the model that powers your agents. Shre runs on a local model by default — add a provider key to route to a frontier model, with per-conversation overrides.',
+    stats: [{ value: 5, label: 'Providers' }, { value: 1, label: 'Active' }, { value: 'Local', label: 'Default' }],
+    rows: [
+      { mark: 'SH', title: 'Shre (local)', sub: 'llama3.2 · default · no key needed', ...rowStatus(s('on', 'Active')), action: 'Configure' },
+      { mark: 'AN', title: 'Anthropic Claude', sub: 'claude-sonnet-4-6', ...rowStatus(s('off', 'Add key')), action: 'Connect' },
+      { mark: 'OA', title: 'OpenAI', sub: 'gpt-4o', ...rowStatus(s('off', 'Add key')), action: 'Connect' },
+      { mark: 'GO', title: 'Google Gemini', sub: 'gemini-2.5-flash', ...rowStatus(s('off', 'Add key')), action: 'Connect' },
+      { mark: 'OL', title: 'Ollama (local)', sub: 'Self-hosted models', ...rowStatus(s('off', 'Available')), action: 'Connect' },
+    ],
+  },
+  health: {
+    eyebrow: 'Observability', primaryCta: 'Run all checks',
+    lead: 'Live status of every connected register, app, model, and sync job — with the failing ones surfaced first so nothing quietly breaks.',
+    stats: [{ value: 2, label: 'Healthy' }, { value: 1, label: 'Degraded' }, { value: 1, label: 'Down' }],
+    rows: [
+      { mark: 'RA', title: 'RapidRMS sync', sub: 'Last sync 2 min ago · 5 stores flowing', ...rowStatus(s('on', 'Healthy')), action: 'Details' },
+      { mark: 'SH', title: 'Shre model', sub: 'Local model responding normally', ...rowStatus(s('on', 'Healthy')), action: 'Details' },
+      { mark: 'VE', title: 'Verifone Commander', sub: 'Credential expiring in 3 days', ...rowStatus(s('warn', 'Degraded')), action: 'Fix' },
+      { mark: 'GM', title: 'Gmail connector', sub: 'Not connected', ...rowStatus(s('off', 'Down')), action: 'Connect' },
+    ],
+  },
+  permissions: {
+    eyebrow: 'Governance',
+    lead: 'Control what each role and agent may read and change — scoped by workspace, connection, store, capability, and action. Write actions are always approval-gated.',
+    rows: [
+      { mark: 'Ow', title: 'Owner', sub: 'Full access · manage billing, connections, and permissions', ...rowStatus(s('on', 'All scopes')), action: 'Edit' },
+      { mark: 'Ad', title: 'Admin', sub: 'Manage stores, apps, skills, and agents', ...rowStatus(s('on', 'Most scopes')), action: 'Edit' },
+      { mark: 'Me', title: 'Member', sub: 'Chat and read-only insights', ...rowStatus(s('warn', 'Read only')), action: 'Edit' },
+    ],
+    note: { title: 'Approval gates active', body: 'Every write action — price changes, reorders, sends — pauses for a human to approve before it runs.' },
+  },
+  team: {
+    eyebrow: 'Administration', primaryCta: 'Invite user',
+    lead: 'Invite teammates and assign workspace roles with least-privilege access.',
+    stats: [{ value: 1, label: 'Members' }, { value: 3, label: 'Roles' }, { value: 0, label: 'Pending invites' }],
+    rows: [
+      { mark: 'DR', title: 'Dana Reyes', sub: 'dana@fivepointsmarket.com · Owner', ...rowStatus(s('on', 'Active')), action: 'Manage' },
+    ],
+  },
+  billing: {
+    eyebrow: 'Administration', primaryCta: 'Manage plan',
+    lead: 'Plan, usage, and invoices for your AROS workspace.',
+    stats: [{ value: 'Growth', label: 'Plan' }, { value: '5', label: 'Stores' }, { value: 'Jul 30', label: 'Next invoice' }],
+    note: { title: 'You’re on the Growth plan', body: 'Up to 10 stores, unlimited chat, and all agents. Change plans anytime — no interruption to your stores.' },
+  },
+  usage: {
+    eyebrow: 'Administration',
+    lead: 'Model spend, calls, and per-agent usage over the current period.',
+    stats: [{ value: '12,480', label: 'Calls (30d)' }, { value: '$42.10', label: 'Spend (30d)' }, { value: 'Local', label: 'Top model' }],
+    rows: [
+      { mark: 'SO', title: 'Store Operations Agent', sub: '6,120 calls · $0.00 (local)', ...rowStatus(s('on', 'Running')), action: 'View' },
+      { mark: 'IN', title: 'Inventory Agent', sub: '4,010 calls · $0.00 (local)', ...rowStatus(s('on', 'Running')), action: 'View' },
+      { mark: 'CO', title: 'Store concierge', sub: '2,350 calls · $42.10 (frontier)', ...rowStatus(s('on', 'Running')), action: 'View' },
+    ],
+  },
+  settings: {
+    eyebrow: 'Administration', primaryCta: 'Save changes',
+    lead: 'Workspace name, branding, and account preferences.',
+    form: [
+      { label: 'Workspace name', value: 'Five Points Market', type: 'text' },
+      { label: 'Timezone', value: 'America/New_York', type: 'select', options: ['America/New_York', 'America/Chicago', 'America/Los_Angeles'] },
+      { label: 'Default store', value: 'All stores', type: 'select', options: ['All stores', 'Main St', 'Oak Ave', 'Harbor'] },
+    ],
+    note: { title: 'Security baseline', body: 'OAuth is preferred over API keys. Secrets are sealed in the Shreai vault; permissions are scoped by workspace, connection, store, capability, and action.' },
+  },
+};
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
   chat: 'Concierge', stores: 'Stores', apps: 'Apps', skills: 'Skills', agents: 'Agents',
   models: 'Models', permissions: 'Permissions', health: 'Connection Health',
   team: 'Team', billing: 'Billing', usage: 'Usage', settings: 'Settings',
 };
+
+function rowStatus([status, statusLabel]: [Status, string]) { return { status, statusLabel }; }
