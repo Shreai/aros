@@ -134,7 +134,7 @@ export function AppShell() {
   const title = mode === 'chat' ? 'Concierge' : mode === 'home' ? 'Home' : SECTION_TITLES[section];
   const renderSection = () => {
     if (demo) return <SectionPanel section={section} onConnect={openWizard} />;
-    if (section === 'stores') return <StoresPage />;
+    if (section === 'stores') return <StoresPage onConnect={openWizard} />;
     if (section === 'apps') return <AppsPage />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
