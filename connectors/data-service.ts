@@ -71,9 +71,9 @@ function pickStr(row: Record<string, unknown>, names: string[]): string | null {
 // defensive design means an unrecognized shape yields an empty (partial)
 // section, never a wrong number — safe to ship, refine once a real tenant
 // connects.
-const REVENUE_FIELDS = ['Total', 'NetSales', 'NetTotal', 'GrandTotal', 'SalesAmount', 'Amount', 'TotalAmount'];
-const SALES_DATE_FIELDS = ['InvoiceDate', 'invoice_date', 'BusinessDate', 'business_date', 'Date', 'date'];
-const INVOICE_FIELDS = ['InvoiceNo', 'invoice_no', 'InvoiceNumber', 'TransactionId', 'transaction_id'];
+const REVENUE_FIELDS = ['Total', 'NetSales', 'NetTotal', 'GrandTotal', 'SalesAmount', 'Amount', 'TotalAmount', 'BillAmount', 'bill_amount'];
+const SALES_DATE_FIELDS = ['InvoiceDate', 'invoiceDate', 'invoice_date', 'CreatedDate', 'createdDate', 'BusinessDate', 'business_date', 'Date', 'date'];
+const INVOICE_FIELDS = ['InvoiceNo', 'invoiceNo', 'invoice_no', 'InvoiceNumber', 'TransactionId', 'transaction_id'];
 const TXN_COUNT_FIELDS = ['TransactionCount', 'Transactions', 'Count', 'InvoiceCount', 'Receipts'];
 const QTY_FIELDS = ['OnHand', 'QtyOnHand', 'Quantity', 'Qty', 'StockOnHand', 'CurrentStock'];
 const REORDER_FIELDS = ['ReorderPoint', 'ReorderLevel', 'MinQty', 'MinimumQty', 'Threshold', 'ParLevel'];
@@ -118,8 +118,8 @@ async function fetchRapidRmsSummary(
     let revenue = 0;
     let transactions = 0;
     try {
-      const salesRaw = await rapidRms.getSalesDetail(session, {
-        FromDate: from, ToDate: to, StartDate: from, EndDate: to,
+      const salesRaw = await rapidRms.getInvoiceReport(session, {
+        FromDate: from, ToDate: to, pageNo: 1, pageSize: 10000,
       });
       const rows = toRows(salesRaw);
       let sawRevenue = false;
@@ -206,14 +206,14 @@ export async function fetchStoreSalesRange(
     const passwordRef = await storeCredential(`${record.id}:sales-password`, record.secrets.password ?? '');
     refs.push(emailRef, passwordRef);
     const session = await rapidRms.authenticate({ baseUrl: String(record.config.baseUrl || 'https://rapidrmsapi.azurewebsites.net'), clientId: String(record.config.clientId || ''), sessionTimeout: Number(record.config.sessionTimeout) || 420 }, emailRef, passwordRef);
-    const raw = await rapidRms.getSalesDetail(session, { FromDate: `${from}T00:00:00`, ToDate: `${to}T23:59:59`, StartDate: `${from}T00:00:00`, EndDate: `${to}T23:59:59` });
+    const raw = await rapidRms.getInvoiceReport(session, { FromDate: `${from}T00:00:00`, ToDate: `${to}T23:59:59`, pageNo: 1, pageSize: 10000 });
     const buckets = new Map<string, { revenue: number; invoices: Set<string>; rows: number }>();
     for (const row of toRows(raw)) {
       const dateValue = pickStr(row, SALES_DATE_FIELDS);
       const businessDate = dateValue?.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
       if (!businessDate || businessDate < from || businessDate > to) continue;
       const bucket = buckets.get(businessDate) || { revenue: 0, invoices: new Set<string>(), rows: 0 };
-      bucket.revenue += pickNum(row, [...REVENUE_FIELDS, 'BillAmount', 'bill_amount']) || 0;
+      bucket.revenue += pickNum(row, REVENUE_FIELDS) || 0;
       const invoice = pickStr(row, INVOICE_FIELDS);
       if (invoice) bucket.invoices.add(invoice);
       bucket.rows++;

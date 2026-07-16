@@ -2097,15 +2097,20 @@ async function handleStoreSales(req: IncomingMessage, res: ServerResponse): Prom
 
 const APP_CAPABILITY_BUNDLES: Record<string, { tools: string[]; skills: Array<{ name: string; capabilities: string[] }> }> = {
   storepulse: {
-    tools: ['mib_sales_today', 'mib_sales_summary', 'mib_sales_totals', 'mib_top_items', 'mib_item_search', 'mib_low_inventory'],
+    tools: ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_item_search', 'mib_low_inventory'],
     skills: [
       { name: 'Daily Sales Summary', capabilities: ['pos.sales.read'] },
       { name: 'Inventory Health', capabilities: ['pos.inventory.read'] },
       { name: 'Store Performance', capabilities: ['stores.read', 'pos.sales.read'] },
     ],
   },
-  mib: { tools: ['mib_workspace_get', 'mib_agent_list', 'mib_task_list'], skills: [{ name: 'Workspace Operations', capabilities: ['workspace.admin'] }] },
-  centrix: { tools: ['centrix_search', 'centrix_ticket_list'], skills: [{ name: 'Customer and Ticket Operations', capabilities: ['crm.read', 'tickets.read'] }] },
+  mib: { tools: ['mib_get_workspace', 'mib_list_agents', 'mib_list_tasks'], skills: [{ name: 'Workspace Operations', capabilities: ['workspace.admin'] }] },
+  centrix: { tools: ['centrix_search_contacts', 'centrix_list_contacts', 'centrix_list_tasks', 'centrix_list_deals'], skills: [{ name: 'Customer Operations', capabilities: ['crm.read', 'tasks.read'] }] },
+};
+
+const CONNECTOR_CAPABILITY_TOOLS: Record<string, string[]> = {
+  'rapidrms-api': ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_store_list', 'mib_item_search', 'mib_low_inventory', 'mib_invoices', 'rapidrms_storepulse'],
+  'verifone-commander': ['mib_sales_today', 'mib_sales_summary', 'mib_top_items', 'mib_store_list', 'mib_item_search', 'mib_low_inventory', 'mib_invoices'],
 };
 
 async function handleWorkspaceCapabilities(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2115,14 +2120,19 @@ async function handleWorkspaceCapabilities(req: IncomingMessage, res: ServerResp
   const tenantId = getRequestUrl(req).searchParams.get('tenantId') || '';
   if (!serviceToken || source !== 'shre-router' || !tokensMatch(presented, serviceToken) || !UUID_RE.test(tenantId)) return json(res, 401, { error: 'Authentication required' });
   const supabase = createSupabaseAdmin();
-  const [{ data: grants, error: grantError }, { data: resources, error: resourceError }] = await Promise.all([
+  const [{ data: grants, error: grantError }, { data: resources, error: resourceError }, { data: connectors, error: connectorError }] = await Promise.all([
     supabase.from('marketplace_app_entitlements').select('app_key,status,service_config').eq('tenant_id', tenantId).eq('status', 'active'),
     supabase.from('tenant_resources').select('kind,provider,name,status,capabilities,config,store_ids').eq('tenant_id', tenantId).eq('status', 'active'),
+    supabase.from('tenant_connectors').select('type,status').eq('tenant_id', tenantId).eq('status', 'connected'),
   ]);
-  if (grantError || resourceError) return json(res, 500, { error: grantError?.message || resourceError?.message });
+  if (grantError || resourceError || connectorError) return json(res, 500, { error: grantError?.message || resourceError?.message || connectorError?.message });
   const appKeys = (grants || []).map(grant => String(grant.app_key));
-  const tools = [...new Set(appKeys.flatMap(appKey => APP_CAPABILITY_BUNDLES[appKey]?.tools || []))];
-  await auditLog({ tenantId, action: 'workspace.capabilities.service_read', resource: tenantId, detail: { source, apps: appKeys.length, tools: tools.length }, ip: getClientIp(req) });
+  const connectorTypes = (connectors || []).map(connector => String(connector.type));
+  const tools = [...new Set([
+    ...appKeys.flatMap(appKey => APP_CAPABILITY_BUNDLES[appKey]?.tools || []),
+    ...connectorTypes.flatMap(type => CONNECTOR_CAPABILITY_TOOLS[type] || []),
+  ])];
+  await auditLog({ tenantId, action: 'workspace.capabilities.service_read', resource: tenantId, detail: { source, apps: appKeys.length, connectors: connectorTypes.length, tools: tools.length }, ip: getClientIp(req) });
   json(res, 200, { tenantId, apps: grants || [], resources: resources || [], tools, generatedAt: new Date().toISOString() });
 }
 
