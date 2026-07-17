@@ -1,9 +1,11 @@
 # Journey: Store owner connects their POS and sees THEIR numbers
 Persona: Ramesh (see README.md)
 Trigger: The sample-store demo convinced him; he wants his own store in AROS.
-Entry point: The **"Connect your store"** CTA on `/start`, the sample-data
-banner on the dashboard, or **Stores** in the sidebar — all landing on
-`/connect`.
+Entry point: The **"Set up your workspace"** CTA on `/start` (→ `/onboarding`,
+whose journey includes the connect step), the sample-data banner on the
+dashboard, or **Stores** in the sidebar — the latter two landing directly on
+`/connect`. *(Live-verified 2026-07-17; CTA copy/route changed with the
+onboarding JourneyPage.)*
 
 ## Golden path (budget: ≤ 5 steps / ≤ 15 minutes)
 | # | User sees | Must already know | The ONE action they take |
