@@ -22,23 +22,12 @@ route only existing on unmerged shreai#761; restored via shreai#1007 +
 public-allowlist shreai#1012, patched onto the serving pm2 router, prod walk
 J1 now WALKS CLEAN.)*
 
-## J1 step 5 — 🔴 LIVE (public path): demo chat answers $0.00 from the real empty tenant
+## Residual debt (from the closed demo-chat $0.00 finding)
 
-Found by the **persona walk** (fresh signup → `/start` → tap "Why are sales
-down vs last week?"): the router's deterministic paths (fast-path templates,
-octopus arms) ignore `demoMode`, query the live warehouse scoped to the
-brand-new empty tenant, and answer **"Total Sales: $0.00"** — or worse, a raw
-psql error table via `arm:sales → pos_sales_by_tender`. The sample store's
-numbers never appear in chat.
-
-**Router fix MERGED (shreai#1020, beta-E2E-verified in 5 rounds):** demo
-requests skip all four deterministic families, run tools-off against the
-grounded scenario context, skip the real-tenant data-access preamble, and
-pin the clean instruct model. Beta answer: "Total Sales: $4,823.00 … -10.4%".
-**Still broken on app.aros.live** — the public `/v1` is served by the
-hand-run pm2 router (hand-patched `chat-proxy`, not transplantable); the fix
-lands with the deploy-unification cutover to the launch.sh-managed router.
-Related debt (real tenants, any path that reaches them):
+*(The $0.00 finding itself closed 2026-07-17: shreai#1020 merged and the
+public `/v1` cutover to the launch.sh-managed docker router landed (aros#85
+socat edge + passport, aros#86 reply-envelope fix); demo journey verified
+live end-to-end by persona walk.)* Remaining debt for real tenants:
 `tool-forge/output/*` tools still shell to psql — one hardcodes PGPASSWORD —
 needs the #991-style pg-client migration + a security-lane look.
 
@@ -57,13 +46,20 @@ recognizable live detail ("we found <store>: N transactions today") from
   data-wiring session). When it merges, replace the connector-row heuristic
   behind `hasConnector`/`summaryCapable` with the real binding states.
 
-## J4 — trend history needs a week of snapshots (by design)
+## J2/J4 — 🔴 LIVE: real store's summary pull is `partial` — snapshot history is zeros
 
-The snapshotter now runs **by default** (every 6h; `STORE_SNAPSHOT_INTERVAL_MIN=0`
-to opt out), so trends accrue from day one of a connected store with no
-operator step. "Collecting history" remains the honest label for the first
-week — that part is physics, not a defect. Verify after the next prod
-deploy that the `[aros-platform] store snapshotter enabled` boot log appears.
+Snapshotter confirmed live on prod (boot log present; first row upserted
+2026-07-17 12:01 UTC for the real connected tenant). **But that row is
+`revenue:0, transactions:0, partial:true`** — the RapidRMS sales sub-fetch
+fails against the real store ("Party Liquor"), so the zeros are fetch
+failures, not facts. Consequences while unfixed: Home KPIs render no real
+numbers for the flagship connected tenant, and snapshot history accrues
+garbage zeros (trend math fails safe — zero-revenue priors are excluded —
+but a week of `partial` rows is worthless). Likely fix = open **PR #18
+`fix/rapidrms-auth-double-decode`** ("real API contract + double-encoded
+response", data-wiring lane) — land it, then verify the next snapshot row
+has `partial:false` and real revenue. Consider having `captureStoreSnapshots`
+skip `partial` summaries so they never enter history.
 
 ## Structural — connect UIs share one provider catalogue; step flows still differ
 
