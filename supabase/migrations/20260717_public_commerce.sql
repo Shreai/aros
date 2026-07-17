@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS public.public_cart_drafts (
 
 CREATE INDEX IF NOT EXISTS idx_public_cart_drafts_tenant
   ON public.public_cart_drafts(tenant_id, created_at DESC);
+-- Supports the expired-draft purge (bounds unbounded growth from the public POST /cart path).
+CREATE INDEX IF NOT EXISTS idx_public_cart_drafts_expiry
+  ON public.public_cart_drafts(expires_at);
 
 ALTER TABLE public.public_cart_drafts ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS pcd_select_member ON public.public_cart_drafts;
@@ -60,7 +63,12 @@ GRANT SELECT ON public.public_cart_drafts TO authenticated;
 -- ── public_products_v: THE customer-safe product projection ────────────────
 -- Latest snapshot row per (store, sku); availability quantized; cost columns
 -- and exact quantities EXCLUDED BY CONSTRUCTION.
-CREATE OR REPLACE VIEW public.public_products_v AS
+-- security_invoker=true: the view runs with the CALLER's privileges, so the
+-- RLS on pos_inventory_snapshot still applies — it does NOT become an
+-- RLS-bypassing definer view auto-readable by anon via PostgREST. The API
+-- layer reads it through the service role; anon/authenticated get no grant.
+CREATE OR REPLACE VIEW public.public_products_v
+WITH (security_invoker = true) AS
 SELECT DISTINCT ON (s.store_id, s.sku)
   s.tenant_id,
   s.store_id,
@@ -80,3 +88,20 @@ ORDER BY s.store_id, s.sku, s.snapshot_at DESC;
 
 COMMENT ON VIEW public.public_products_v IS
   'Customer-safe product projection. Excludes unit_cost, exact units_on_hand, inventory_value, raw. Availability quantized to unknown/unavailable/low_stock/in_stock. Serves /api/public/businesses/{slug}/products.';
+
+-- Belt-and-suspenders: this view (and the two public tables) must never be
+-- reachable via the anon/authenticated PostgREST keys. Only the service role
+-- (used inside the API layer, behind rate limiting + the response envelope)
+-- may read them. Revoke Supabase's default auto-grants explicitly.
+REVOKE ALL ON public.public_products_v FROM anon, authenticated;
+REVOKE ALL ON public.public_promotions FROM anon, authenticated;
+REVOKE ALL ON public.public_cart_drafts FROM anon, authenticated;
+
+-- Bound the public POST /cart path: purge expired drafts. Called best-effort
+-- by the API on each cart insert; also safe to run from a scheduled job.
+CREATE OR REPLACE FUNCTION public.purge_expired_cart_drafts()
+RETURNS integer LANGUAGE sql AS $$
+  WITH deleted AS (
+    DELETE FROM public.public_cart_drafts WHERE expires_at < now() RETURNING 1
+  ) SELECT count(*)::integer FROM deleted;
+$$;

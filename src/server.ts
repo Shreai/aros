@@ -3539,10 +3539,11 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   // ── Public customer commerce (Regulars Phase 1) ─────────────────────────
   // Unauthenticated, rate-limited, strict projection; serves the customer MCP
-  // gateway. Journey: docs/journeys/customer-orders-through-their-assistant.md
-  if (pathname.startsWith('/api/public/businesses/')) {
-    if (await handlePublicBusinessApi(req, res, requestUrl)) return;
-  }
+  // gateway. Terminal for the whole prefix — the handler always answers with a
+  // customer-safe envelope (even near-misses), so nothing under this prefix
+  // falls through to the platform's generic 404/SPA output.
+  // Journey: docs/journeys/customer-orders-through-their-assistant.md
+  if (await handlePublicBusinessApi(req, res, requestUrl)) return;
 
   // ── Billing ─────────────────────────────────────────────────
   if (url === '/api/billing/checkout' && method === 'POST') {

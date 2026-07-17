@@ -93,5 +93,19 @@ ok(r.status === 404 && r.body?.refusal?.code === 'no_matching_products', 'unknow
 r = await call(`${SLUG}/cart`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ sku: 'NOPE-404', qty: 1 }] }) });
 ok(r.status === 404 && r.body?.refusal?.code === 'unknown_items', 'cart with unknown sku: refusal');
 
+// Out-of-stock item is refused, not drafted (CHP-REG has units_on_hand 0 in the seed)
+r = await call(`${SLUG}/cart`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ sku: 'CHP-REG', qty: 1 }] }) });
+ok(r.status === 409 && r.body?.refusal?.code === 'items_unavailable', 'out-of-stock item: refused, not drafted');
+
+// Near-miss paths get a customer-safe refusal, never platform fallthrough
+r = await call(`${SLUG}/products/`);   // trailing slash
+ok(r.body?.channel === 'customer', 'trailing-slash near-miss: customer envelope (no fallthrough)');
+r = await call(`${SLUG}/orders`);      // unknown resource
+ok(r.status === 404 && r.body?.refusal?.code === 'unknown_resource', 'unknown resource: structured refusal');
+
+// Negative limit is clamped, not a false outage
+r = await call(`${SLUG}/products?limit=-1`);
+ok(r.status === 200, 'negative limit: clamped, not a false 502');
+
 console.log(failures === 0 ? '\nALL PASS — golden path grounded end to end.' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

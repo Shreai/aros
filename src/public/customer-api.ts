@@ -35,10 +35,24 @@ setInterval(() => {
   for (const [ip, b] of buckets) if (b.last < cutoff) buckets.delete(ip);
 }, 60 * 1000).unref?.();
 
+// Rate-limit key. x-forwarded-for is client-controllable at its LEFT end
+// (each proxy APPENDS the peer it saw), so the leftmost hop is spoofable and
+// must never be the key. TRUSTED_PROXY_HOPS = how many proxies sit in front of
+// this process (Cloudflare tunnel + nginx = 2); we take the hop that many
+// positions from the RIGHT — the address our own edge observed. Default 0 =
+// trust nothing and key on the real TCP peer (socket.remoteAddress), which
+// cannot be spoofed. Operator sets the hop count to match the deployment.
+const TRUSTED_PROXY_HOPS = Math.max(0, Number(process.env.PUBLIC_API_TRUSTED_PROXY_HOPS) || 0);
+
 function clientIp(req: IncomingMessage): string {
-  const fwd = req.headers['x-forwarded-for'];
-  const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
-  return (first ?? req.socket.remoteAddress ?? 'unknown').trim();
+  const socketIp = req.socket.remoteAddress ?? 'unknown';
+  if (TRUSTED_PROXY_HOPS === 0) return socketIp;
+  const raw = req.headers['x-forwarded-for'];
+  const chain = (Array.isArray(raw) ? raw.join(',') : raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  // The hop TRUSTED_PROXY_HOPS from the end is the client as seen by our
+  // outermost trusted proxy; anything further left is attacker-appendable.
+  const idx = chain.length - TRUSTED_PROXY_HOPS;
+  return chain[idx] ?? chain[0] ?? socketIp;
 }
 
 function send(res: ServerResponse, status: number, body: Record<string, unknown>, extra?: Record<string, string>): void {
@@ -111,7 +125,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown> |
 async function handleProducts(res: ServerResponse, biz: Business, slug: string, url: URL, correlationId: string): Promise<void> {
   const supabase = createSupabaseAdmin();
   const query = (url.searchParams.get('q') ?? url.searchParams.get('query') ?? '').trim();
-  const limit = Math.min(Number(url.searchParams.get('limit')) || 10, MAX_RESULTS);
+  const limit = Math.max(1, Math.min(Math.floor(Number(url.searchParams.get('limit')) || 10), MAX_RESULTS));
   let sel = supabase.from('public_products_v')
     .select('sku, name, department, unit_price, availability, as_of')
     .eq('store_id', biz.storeId).limit(limit);
@@ -135,6 +149,9 @@ async function handlePromotions(res: ServerResponse, biz: Business, slug: string
   const { data, error } = await supabase.from('public_promotions')
     .select('id, title, description, kind, sponsored, starts_at, ends_at')
     .eq('tenant_id', biz.tenantId).eq('status', 'active')
+    // store_id null = all locations; a specific id = that store only. Never
+    // surface another location's promotion for the store the customer asked about.
+    .or(`store_id.is.null,store_id.eq.${biz.storeId}`)
     .lte('starts_at', nowIso)
     .or(`ends_at.is.null,ends_at.gte.${nowIso}`)
     .order('sponsored', { ascending: false })
@@ -165,18 +182,27 @@ async function handleCart(req: IncomingMessage, res: ServerResponse, biz: Busine
     return refuse(res, 400, slug, correlationId, 'invalid_cart', `Provide 1-${CART_MAX_ITEMS} items as [{sku, qty}].`);
   }
   const supabase = createSupabaseAdmin();
+  // Best-effort purge of expired drafts to bound growth from this public path.
+  supabase.rpc('purge_expired_cart_drafts').then(() => {}, () => {});
   const skus = items.map((i) => String(i.sku ?? '')).filter(Boolean);
-  const { data: rows } = await supabase.from('public_products_v')
+  const { data: rows, error: lookupError } = await supabase.from('public_products_v')
     .select('sku, name, unit_price, availability')
     .eq('store_id', biz.storeId).in('sku', skus);
+  // A DB/projection error must surface as an outage, never a false "not in catalog".
+  if (lookupError) return refuse(res, 502, slug, correlationId, 'projection_unavailable', 'The product projection is temporarily unavailable.');
   const bySku = new Map((rows ?? []).map((r) => [r.sku as string, r]));
   const missing = skus.filter((s) => !bySku.has(s));
   if (missing.length > 0) {
     return refuse(res, 404, slug, correlationId, 'unknown_items', `Not in this store's catalog: ${missing.join(', ')}.`);
   }
+  const unavailable = skus.filter((s) => bySku.get(s)?.availability === 'unavailable');
+  if (unavailable.length > 0) {
+    return refuse(res, 409, slug, correlationId, 'items_unavailable',
+      `Out of stock at this store: ${unavailable.map((s) => bySku.get(s)?.name ?? s).join(', ')}.`);
+  }
   const priced = items.map((i) => {
     const row = bySku.get(String(i.sku))!;
-    const qty = Math.max(1, Math.min(99, Number(i.qty) || 1));
+    const qty = Math.max(1, Math.min(99, Math.floor(Number(i.qty) || 1)));
     return { sku: row.sku, name: row.name, qty, unit_price: Number(row.unit_price), availability: row.availability };
   });
   const subtotal = Math.round(priced.reduce((n, i) => n + i.unit_price * i.qty, 0) * 100) / 100;
@@ -196,9 +222,12 @@ async function handleCheckout(req: IncomingMessage, res: ServerResponse, biz: Bu
   const cartId = String(body?.cartId ?? '');
   if (!cartId) return refuse(res, 400, slug, correlationId, 'invalid_checkout', 'Provide the cartId to check out.');
   const supabase = createSupabaseAdmin();
-  const { data: cart } = await supabase.from('public_cart_drafts')
+  // Scope by store, not just tenant — a cart drafted at store A must not be
+  // checked out under store B of the same tenant (wrong prices/location).
+  const { data: cart, error: cartError } = await supabase.from('public_cart_drafts')
     .select('id, items, subtotal, status, expires_at')
-    .eq('id', cartId).eq('tenant_id', biz.tenantId).maybeSingle();
+    .eq('id', cartId).eq('tenant_id', biz.tenantId).eq('store_id', biz.storeId).maybeSingle();
+  if (cartError) return refuse(res, 502, slug, correlationId, 'checkout_unavailable', 'Could not look up that cart right now.');
   if (!cart) return refuse(res, 404, slug, correlationId, 'unknown_cart', 'That cart draft does not exist for this store.');
   if (cart.status === 'expired' || new Date(String(cart.expires_at)) < new Date()) {
     return refuse(res, 410, slug, correlationId, 'cart_expired', 'That cart draft has expired — start a new one.');
@@ -213,14 +242,29 @@ async function handleCheckout(req: IncomingMessage, res: ServerResponse, biz: Bu
   });
 }
 
-// ── router entry: returns true when the request was handled ────────────────
+// ── router entry: TERMINAL for the whole /api/public/businesses/ prefix ────
+// Returns false only when the path is not under the prefix at all. Anything
+// under the prefix gets a customer-safe envelope+refusal response — a
+// near-miss (trailing slash, uppercase slug, unknown resource) must never
+// fall through to the platform's generic 404/SPA output, which the gateway
+// would relay as non-customer-safe.
+const PREFIX = '/api/public/businesses/';
 const ROUTE = /^\/api\/public\/businesses\/([a-z0-9-]{1,64})\/(products|promotions|hours|cart|checkout)$/;
 
 export async function handlePublicBusinessApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
-  const match = ROUTE.exec(url.pathname);
-  if (!match) return false;
+  if (!url.pathname.startsWith(PREFIX)) return false;
+  // Normalize a single trailing slash and lowercase the slug segment before matching.
+  const normalized = url.pathname.replace(/\/+$/, (m) => (m.length ? '' : m)).toLowerCase();
+  const match = ROUTE.exec(normalized);
+  const correlationId0 = (req.headers['x-correlation-id'] as string | undefined) ?? randomUUID();
+  if (!match) {
+    const slugGuess = normalized.slice(PREFIX.length).split('/')[0] || 'unknown';
+    refuse(res, 404, slugGuess, correlationId0, 'unknown_resource',
+      'That is not a valid customer endpoint. Use /products, /promotions, /hours, /cart, or /checkout for a business.');
+    return true;
+  }
   const [, slug, resource] = match;
-  const correlationId = (req.headers['x-correlation-id'] as string | undefined) ?? randomUUID();
+  const correlationId = correlationId0;
   const started = Date.now();
   const ip = clientIp(req);
 
