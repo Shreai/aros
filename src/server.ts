@@ -75,6 +75,48 @@ const startedAt = new Date().toISOString();
 const SHRE_METER_URL = process.env.SHRE_METER_URL || 'http://127.0.0.1:5495';
 const SHRE_TASKS_URL = process.env.SHRE_TASKS_URL || 'http://127.0.0.1:5460';
 const SHRE_ROUTER_URL = process.env.SHRE_ROUTER_URL || 'http://127.0.0.1:5497';
+// Router service passport — the launch.sh-managed shre-router enforces
+// passport auth on /v1/chat (cost/tenant accounting), but browser requests
+// arrive at this proxy with no bearer. Mint a SERVICE passport at boot and
+// refresh it periodically; proxyRequest attaches it to /v1 traffic that
+// carries no Authorization of its own. Inert unless BOTH env vars are set
+// (the legacy pm2 router needs neither). All anonymous traffic accounts to
+// the 'aros-platform' service identity until per-session passports land
+// (identity-edge lane) — at that point remove this and the router's
+// /v1/chat PUBLIC_ROUTES entry together.
+const SHRE_PASSPORT_URL = process.env.SHRE_PASSPORT_URL || '';
+const PASSPORT_ADMIN_TOKEN = process.env.PASSPORT_ADMIN_TOKEN || '';
+let routerPassportToken = '';
+async function refreshRouterPassport(): Promise<void> {
+  if (!SHRE_PASSPORT_URL || !PASSPORT_ADMIN_TOKEN) return;
+  try {
+    const res = await fetch(`${SHRE_PASSPORT_URL}/v1/passport/issue`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${PASSPORT_ADMIN_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'SERVICE',
+        entityId: 'aros-platform',
+        scopes: ['chat'],
+        ttlSeconds: 7200,
+      }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { token?: string };
+      if (data.token) routerPassportToken = data.token;
+    } else {
+      console.error(`[router-passport] issue failed: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.error('[router-passport] issue error:', (err as Error).message);
+  }
+}
+if (SHRE_PASSPORT_URL && PASSPORT_ADMIN_TOKEN) {
+  void refreshRouterPassport();
+  setInterval(() => void refreshRouterPassport(), 30 * 60 * 1000).unref();
+}
 // shre-rapidrms live-server — the canonical warehouse's API (owner digest,
 // gold views). Same convention as the other SHRE_*_URL upstreams above.
 const SHRE_RAPIDRMS_URL = process.env.SHRE_RAPIDRMS_URL || 'http://127.0.0.1:5443';
@@ -175,6 +217,12 @@ async function proxyRequest(req: IncomingMessage, res: ServerResponse, baseUrl: 
   if (current.pathname.startsWith('/sx-tasks/')) {
     const token = readTaskToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  // Authenticate proxied router traffic that arrived anonymous (browser
+  // chat/demo). Never clobbers a caller-provided Authorization header.
+  if (upstreamPath.startsWith('/v1/') && !headers.has('authorization') && routerPassportToken) {
+    headers.set('Authorization', `Bearer ${routerPassportToken}`);
   }
 
   const body = ['GET', 'HEAD'].includes(req.method || 'GET') ? undefined : req;
