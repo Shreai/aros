@@ -46,20 +46,13 @@ recognizable live detail ("we found <store>: N transactions today") from
   data-wiring session). When it merges, replace the connector-row heuristic
   behind `hasConnector`/`summaryCapable` with the real binding states.
 
-## Inventory section — no live endpoint; low-stock unavailable for RapidRMS
-
-*(The 🔴 "real store's summary pull is partial" finding CLOSED 2026-07-17 via
-#88, live-verified: the sales fetch was fine all along — the flag was
-poisoned by `/api/Inventory/Get` returning 404 (endpoint doesn't exist on
-the live API; `SalesDetail/Get` also 404). `partial` now means sales-only,
-voided invoices are excluded, `isError` envelopes throw, snapshots skip
-partial summaries, and the post-deploy snapshot row for the real tenant is
-`partial:false`. PR #18 closed superseded with credit.)*
-
-Remaining: RapidRMS low-stock is reported `available:false` (honest) — to
-light that KPI up, find the live API's real inventory/stock endpoint (the
-rapidrms-api MCP connector or MIB's ingestion may know it) and map it in
-`fetchRapidRmsSummary`.
+*(Inventory finding CLOSED 2026-07-17 via #90, live-verified: the catalog is
+`GET /api/Item` — mapped with `iteM_InStock`/`iteM_MinStockLevel`/
+`description`, deleted/inactive filtered, thresholds must be >0. Live
+summary for the real store now reads `partial:false, lowStock
+available:true, count:1` — "1000 STORIES CAB." 0/2, a genuine reorder item.
+This followed the #88 closure of the partial-poisoning finding; PR #18
+closed superseded with credit.)*
 
 ## Structural — connect UIs share one provider catalogue; step flows still differ
 
