@@ -46,20 +46,20 @@ recognizable live detail ("we found <store>: N transactions today") from
   data-wiring session). When it merges, replace the connector-row heuristic
   behind `hasConnector`/`summaryCapable` with the real binding states.
 
-## J2/J4 — 🔴 LIVE: real store's summary pull is `partial` — snapshot history is zeros
+## Inventory section — no live endpoint; low-stock unavailable for RapidRMS
 
-Snapshotter confirmed live on prod (boot log present; first row upserted
-2026-07-17 12:01 UTC for the real connected tenant). **But that row is
-`revenue:0, transactions:0, partial:true`** — the RapidRMS sales sub-fetch
-fails against the real store ("Party Liquor"), so the zeros are fetch
-failures, not facts. Consequences while unfixed: Home KPIs render no real
-numbers for the flagship connected tenant, and snapshot history accrues
-garbage zeros (trend math fails safe — zero-revenue priors are excluded —
-but a week of `partial` rows is worthless). Likely fix = open **PR #18
-`fix/rapidrms-auth-double-decode`** ("real API contract + double-encoded
-response", data-wiring lane) — land it, then verify the next snapshot row
-has `partial:false` and real revenue. Consider having `captureStoreSnapshots`
-skip `partial` summaries so they never enter history.
+*(The 🔴 "real store's summary pull is partial" finding CLOSED 2026-07-17 via
+#88, live-verified: the sales fetch was fine all along — the flag was
+poisoned by `/api/Inventory/Get` returning 404 (endpoint doesn't exist on
+the live API; `SalesDetail/Get` also 404). `partial` now means sales-only,
+voided invoices are excluded, `isError` envelopes throw, snapshots skip
+partial summaries, and the post-deploy snapshot row for the real tenant is
+`partial:false`. PR #18 closed superseded with credit.)*
+
+Remaining: RapidRMS low-stock is reported `available:false` (honest) — to
+light that KPI up, find the live API's real inventory/stock endpoint (the
+rapidrms-api MCP connector or MIB's ingestion may know it) and map it in
+`fetchRapidRmsSummary`.
 
 ## Structural — connect UIs share one provider catalogue; step flows still differ
 
