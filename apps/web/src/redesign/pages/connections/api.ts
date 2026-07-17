@@ -101,3 +101,41 @@ export async function listMarketplaceEntitlements(auth: AuthScope): Promise<AppG
   const data = await request<{ entitlements?: AppGrant[] }>('/api/marketplace/entitlements', auth);
   return data.entitlements || [];
 }
+
+// ── Plugins (unified: tenant-built apps + installed marketplace plugins) ──────
+export type PluginStatus = 'draft' | 'preview' | 'live' | 'retired';
+
+// An app this tenant built via the App Factory (public.tenant_apps).
+export type BuiltPlugin = {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  status: PluginStatus | string;
+  subdomain: string;
+  image_version?: string | null;
+  url?: string | null;
+  confirmable: boolean; // true only while status === 'preview'
+  promoted_at?: string | null;
+  updated_at?: string | null;
+};
+
+// A marketplace app the tenant enabled with source === 'plugin'.
+export type InstalledPlugin = {
+  app_key: string;
+  name: string;
+  status: string;
+  source?: string | null;
+  enabled_at?: string | null;
+};
+
+export async function listPlugins(auth: AuthScope): Promise<{ built: BuiltPlugin[]; installed: InstalledPlugin[] }> {
+  const data = await request<{ built?: BuiltPlugin[]; installed?: InstalledPlugin[] }>('/api/plugins', auth);
+  return { built: data.built || [], installed: data.installed || [] };
+}
+
+// Confirm & publish a built plugin (preview → live). Owner/admin only.
+export async function confirmPlugin(auth: AuthScope, id: string): Promise<BuiltPlugin> {
+  const result = await request<{ app: BuiltPlugin }>(`/api/plugins/${encodeURIComponent(id)}/confirm`, auth, { method: 'POST' });
+  return result.app;
+}

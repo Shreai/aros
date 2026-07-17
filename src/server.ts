@@ -19,6 +19,8 @@ import {
 import { handleStripeWebhook } from './billing/webhook.js';
 import { provisionLicense } from './billing/license.js';
 import { listTasks } from '../tasks/store.js';
+import { approveGoLive } from '../appfactory/index.js';
+import type { AppFactoryDeps, RegistryClient } from '../appfactory/index.js';
 import { createSupabaseAdmin } from './supabase.js';
 import { createEventBus } from 'shre-sdk/events';
 import { createHeartbeatMonitor } from 'shre-sdk/heartbeat';
@@ -1400,6 +1402,147 @@ async function handleMarketplaceEntitlements(req: IncomingMessage, res: ServerRe
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to list marketplace entitlements';
     console.error('[marketplace.entitlements]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+// ── Plugins (unified) ───────────────────────────────────────────────────────
+// A "Plugin" in the tenant-facing sense is any app that shows up under the
+// workspace's Plugins section. Two sources are merged here (DECIDED: unified):
+//   * built     — apps this tenant GENERATED via the App Factory
+//                 (public.tenant_apps, lifecycle draft→preview→live→retired).
+//                 This is the "StorePulse-like app I built for my business" case.
+//   * installed — marketplace apps the tenant enabled with source = 'plugin'
+//                 (public.marketplace_app_entitlements), same rows the page
+//                 showed before this endpoint existed.
+// The frontend groups them under two headers; MIB reads the same contract.
+const APPS_HOST = process.env.AROS_APPS_HOST || 'apps.aros.live';
+
+type PgError = { code?: string; message?: string };
+
+/** tenant_apps may not be applied yet (migration is staged-apply). Treat a
+ *  missing table/schema as "no built apps" rather than failing the whole
+ *  Plugins page — installed marketplace plugins must still render. */
+function isMissingRelation(error: unknown): boolean {
+  const code = (error as PgError | null)?.code;
+  return code === '42P01' || code === '42703'; // undefined_table / undefined_column
+}
+
+async function handlePluginsList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+
+  try {
+    const supabase = createSupabaseAdmin();
+
+    const [builtRes, installedRes] = await Promise.all([
+      supabase
+        .from('tenant_apps')
+        .select('id, slug, display_name, description, status, subdomain, image_version, promoted_at, updated_at')
+        .eq('tenant_id', auth.tenantId)
+        .neq('status', 'retired')
+        .order('updated_at', { ascending: false }),
+      supabase
+        .from('marketplace_app_entitlements')
+        .select('app_key, status, source, enabled_at')
+        .eq('tenant_id', auth.tenantId)
+        .eq('source', 'plugin')
+        .order('app_key', { ascending: true }),
+    ]);
+
+    if (builtRes.error && !isMissingRelation(builtRes.error)) throw builtRes.error;
+    if (installedRes.error) throw installedRes.error;
+
+    const built = (builtRes.data || []).map((row) => {
+      const status = String(row.status);
+      const hasHost = status === 'live' || status === 'preview';
+      return {
+        id: row.id,
+        slug: row.slug,
+        name: row.display_name,
+        description: row.description,
+        status,
+        subdomain: row.subdomain,
+        image_version: row.image_version,
+        url: hasHost ? `https://${row.subdomain}.${APPS_HOST}` : null,
+        // "Confirm & publish" gate: preview → live is the human approval step.
+        confirmable: status === 'preview',
+        promoted_at: row.promoted_at,
+        updated_at: row.updated_at,
+      };
+    });
+
+    const installed = (installedRes.data || [])
+      .filter((row) => row.status === 'active')
+      .map((row) => ({
+        app_key: row.app_key,
+        name: String(row.app_key).split('-').map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' '),
+        status: row.status,
+        source: row.source,
+        enabled_at: row.enabled_at,
+      }));
+
+    json(res, 200, { built, installed });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to list plugins';
+    console.error('[plugins.list]', message);
+    json(res, 500, { error: message });
+  }
+}
+
+/** Adapt the Supabase service-role client to the App Factory's RegistryClient
+ *  seam (structurally compatible; the runtime shape is identical). The go-live
+ *  path never touches raw SQL, so the executor is a guard-only stub. */
+function appFactoryDeps(supabase: ReturnType<typeof createSupabaseAdmin>): AppFactoryDeps {
+  return {
+    registry: supabase as unknown as RegistryClient,
+    sql: { exec: async () => { throw new Error('sql executor not available in the web tier'); } },
+  };
+}
+
+// Confirm & publish: promote a tenant-built app preview → live. This is the
+// human approval gate — it runs service-role (createSupabaseAdmin) and carries
+// the approving user's uuid, which the tenant_apps trigger records as the
+// actor of the 'promoted' event. A tenant admin cannot self-promote via a
+// stolen anon session; only this pipeline-side path can.
+async function handlePluginConfirm(req: IncomingMessage, res: ServerResponse, appId: string): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!canManageMarketplace(auth.role)) return json(res, 403, { error: 'Owner or admin role required' });
+
+  try {
+    const supabase = createSupabaseAdmin();
+
+    // Scope the app to the caller's tenant BEFORE the service-role promote,
+    // so a valid session for tenant A can't confirm tenant B's app by id.
+    const { data: app, error: lookupError } = await supabase
+      .from('tenant_apps')
+      .select('id, tenant_id, status, slug')
+      .eq('id', appId)
+      .maybeSingle();
+
+    if (lookupError && !isMissingRelation(lookupError)) throw lookupError;
+    if (!app || app.tenant_id !== auth.tenantId) return json(res, 404, { error: 'Plugin not found' });
+    if (app.status === 'live') return json(res, 200, { ok: true, app, alreadyLive: true });
+    if (app.status !== 'preview') {
+      return json(res, 409, { error: `Only apps in preview can be published (this app is ${app.status})` });
+    }
+
+    const updated = await approveGoLive(appFactoryDeps(supabase), appId, { approvedBy: auth.userId });
+
+    await auditLog({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      action: 'plugin.published',
+      resource: appId,
+      detail: { slug: app.slug, from: 'preview', to: 'live' },
+      ip: getClientIp(req),
+    });
+
+    json(res, 200, { ok: true, app: updated });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to publish plugin';
+    console.error('[plugins.confirm]', message);
     json(res, 500, { error: message });
   }
 }
@@ -2999,6 +3142,14 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
 
   if (pathname === '/api/marketplace/entitlements' && method === 'GET') {
     return handleMarketplaceEntitlements(req, res);
+  }
+
+  if (pathname === '/api/plugins' && method === 'GET') {
+    return handlePluginsList(req, res);
+  }
+  const pluginConfirmMatch = pathname.match(/^\/api\/plugins\/([0-9a-f-]+)\/confirm$/);
+  if (pluginConfirmMatch && method === 'POST') {
+    return handlePluginConfirm(req, res, pluginConfirmMatch[1]);
   }
 
   if (pathname === '/api/marketplace/install' && method === 'POST') {
