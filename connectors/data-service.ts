@@ -18,6 +18,10 @@ export interface StoreSummary {
   lowStock: {
     count: number;
     items: Array<{ name: string; current: number; threshold: number }>;
+    /** False when the inventory section could not be read (e.g. the live
+     * RapidRMS API has no inventory endpoint) — consumers must not present
+     * count:0 as "all stocked" in that case. */
+    available: boolean;
   };
   source: { type: string; name: string };
   fetchedAt: string;
@@ -71,6 +75,12 @@ function pickStr(row: Record<string, unknown>, names: string[]): string | null {
     if (typeof v === 'string' && v.trim() !== '') return v.trim();
   }
   return null;
+}
+
+/** Live invoice rows carry isVoid (bool/0/1/'true') — voided sales are not revenue. */
+function isVoided(row: Record<string, unknown>): boolean {
+  const v = row.isVoid ?? row.IsVoid ?? row.is_void;
+  return v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
 }
 
 // TODO(real-tenant): field-name lists below are validated against RapidRMS's
@@ -153,27 +163,38 @@ async function fetchRapidRmsSummary(
     );
 
     const { from, to } = todayRange();
+    // `partial` means the SALES numbers are unreliable (fetch failed or rows
+    // carried no recognizable revenue field). Inventory availability is
+    // tracked separately — the live RapidRMS API has no /api/Inventory/Get
+    // (404, live-verified 2026-07-17), and its absence must not poison sales
+    // truth: that poisoning kept every real-store summary partial forever.
     let partial = false;
 
-    // Sales — today's total + transaction count
+    // Sales — today's total + transaction count (voided invoices excluded:
+    // live payload rows carry isVoid; a voided sale is not revenue).
     let revenue = 0;
     let transactions = 0;
     try {
       const rows = await fetchInvoiceRows(session, { FromDate: from, ToDate: to });
       let sawRevenue = false;
+      let counted = 0;
       for (const r of rows) {
+        if (isVoided(r)) continue;
+        counted++;
         const rev = pickNum(r, REVENUE_FIELDS);
         if (rev !== null) { revenue += rev; sawRevenue = true; }
       }
-      // Prefer an explicit count field on the envelope/first row; else row count.
-      transactions = rows.length;
-      if (!sawRevenue && rows.length > 0) partial = true; // rows existed but no revenue field matched
+      transactions = counted;
+      if (!sawRevenue && counted > 0) partial = true; // rows existed but no revenue field matched
     } catch {
       partial = true;
     }
 
-    // Inventory — low-stock items (current below reorder point)
+    // Inventory — low-stock items (current below reorder point). Section is
+    // best-effort: when unreadable, report it UNAVAILABLE rather than
+    // claiming "0 low stock" (a lie) or flagging the sales numbers partial.
     const items: Array<{ name: string; current: number; threshold: number }> = [];
+    let inventoryAvailable = true;
     try {
       const invRaw = await rapidRms.getInventory(session, {});
       const rows = toRows(invRaw);
@@ -187,12 +208,12 @@ async function fetchRapidRmsSummary(
       }
       items.sort((a, b) => a.current - b.current);
     } catch {
-      partial = true;
+      inventoryAvailable = false;
     }
 
     return {
       todaySales: { revenue: Math.round(revenue * 100) / 100, transactions, changePercent: null },
-      lowStock: { count: items.length, items: items.slice(0, 10) },
+      lowStock: { count: items.length, items: items.slice(0, 10), available: inventoryAvailable },
       source: { type: record.type, name: record.name },
       fetchedAt: new Date().toISOString(),
       partial,

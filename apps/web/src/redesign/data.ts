@@ -231,8 +231,10 @@ function buildKpis(summary: any): HomeData['kpis'] {
   }
   const tx = today.transactions;
   if (Number.isFinite(Number(tx))) out.push({ value: Number(tx).toLocaleString(), label: 'Transactions', delta: '' });
-  const low = summary.lowStock?.count;
-  if (Number.isFinite(Number(low))) out.push({ value: String(low), label: 'Low-stock SKUs', delta: Number(low) > 0 ? 'needs reorder' : 'all stocked' });
+  // Only render the low-stock KPI when the inventory section was actually
+  // readable — "0 — all stocked" from an unreadable section would be a lie.
+  const low = summary.lowStock?.available === false ? null : summary.lowStock?.count;
+  if (low != null && Number.isFinite(Number(low))) out.push({ value: String(low), label: 'Low-stock SKUs', delta: Number(low) > 0 ? 'needs reorder' : 'all stocked' });
   return out;
 }
 
