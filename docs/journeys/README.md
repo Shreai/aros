@@ -40,7 +40,13 @@ Every spec defaults to **Ramesh** unless it says otherwise:
    `node scripts/journey-walk.mjs --base <url>` (seam-level HTTP walk:
    routes, wired backends, fail-closed APIs), then the `journey-walker`
    subagent browser-walks the steps marked `NEEDS-BROWSER`.
-4. **Later (earn it)** — automated persona replay on beta blocks promotion.
+4. **Persona replay (EARNED 2026-07-17)** — `node scripts/journey-replay.mjs
+   --base <url>` walks the golden path as Ramesh in a headless browser
+   (phone viewport, dedicated test-workspace account via
+   `REPLAY_EMAIL`/`REPLAY_PASSWORD`; `REPLAY_MUTATIONS=1` adds the
+   bogus-credentials failure walk — test workspaces only). Non-zero exit
+   blocks the invoker: it runs daily from the aros-vps cron next to the seam
+   walk, and belongs in any deploy/promote checklist.
 
 **Definition of done: Ramesh completes the journey on beta without help.**
 
