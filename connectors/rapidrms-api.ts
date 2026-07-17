@@ -49,8 +49,11 @@ export async function authenticate(
   }
   const data = parsedData as Record<string, unknown>;
   const token = String(data.access_token ?? '');
-  const dbName = String(data.DbName ?? '');
-  if (!token || !dbName) throw new Error('RapidRMS auth response did not include token and database context');
+  // DbName is absent on some live tenants — gating on it failed VALID logins
+  // (PR #18's field finding). Token alone proves auth; DbName is sent as a
+  // header only when present.
+  const dbName = String(data.DbName ?? data.dbName ?? '');
+  if (!token) throw new Error('RapidRMS auth response did not include an access token');
   const cookie = res.headers.get('set-cookie') ?? '';
   const timeout = config.sessionTimeout || 420;
 
@@ -89,8 +92,8 @@ export async function request(
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${session.token}`,
-      DbName: session.dbName,
-      Cookie: session.cookie,
+      ...(session.dbName ? { DbName: session.dbName } : {}),
+      ...(session.cookie ? { Cookie: session.cookie } : {}),
     },
   };
 
@@ -103,7 +106,20 @@ export async function request(
     throw new Error(`RapidRMS ${method} ${path}: ${res.status} ${res.statusText}`);
   }
 
-  return res.json();
+  const payload = (await res.json()) as unknown;
+  // Live endpoints wrap results as { isError, data, message } with HTTP 200
+  // regardless (verified 2026-07-17). Surface API-level errors honestly
+  // instead of letting callers mistake them for empty result sets.
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const envelope = payload as Record<string, unknown>;
+    const flag = envelope.isError;
+    if (flag === true || flag === 1 || flag === '1') {
+      throw new Error(
+        `RapidRMS ${method} ${path} returned an error: ${String(envelope.message ?? envelope.Message ?? 'unknown')}`,
+      );
+    }
+  }
+  return payload;
 }
 
 // ── Test ────────────────────────────────────────────────────────

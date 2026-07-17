@@ -2210,6 +2210,9 @@ async function captureStoreSnapshots(): Promise<{ captured: number; failed: numb
         vaultSecretFor(tenantId),
       );
       if (!summary) { skipped++; continue; } // unsupported connector type
+      // A partial summary's zeros are fetch failures, not facts — never let
+      // them enter trend history (they'd poison week-over-week forever).
+      if (summary.partial) { skipped++; continue; }
       const { error: upErr } = await supabase.from('store_snapshots').upsert({
         tenant_id: tenantId,
         connector_id: row.id,
