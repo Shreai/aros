@@ -43,3 +43,6 @@ Every spec defaults to **Ramesh** unless it says otherwise:
 4. **Later (earn it)** — automated persona replay on beta blocks promotion.
 
 **Definition of done: Ramesh completes the journey on beta without help.**
+
+Known gaps between these contracts and the current build (with file refs):
+[WALK-FINDINGS.md](WALK-FINDINGS.md) — the punch list; it trends to empty.
