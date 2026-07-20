@@ -21,6 +21,7 @@ import { provisionLicense } from './billing/license.js';
 import { listTasks } from '../tasks/store.js';
 import { createSupabaseAdmin, createSupabaseAuthClient } from './supabase.js';
 import { validateAddMemberInput, INVITEE_NOT_REGISTERED } from './workspace-members.js';
+import { parsePlatformAdmins, isPlatformAdmin } from './platform-admin.js';
 import { createTermsModule } from './terms/gate.js';
 import { createEventBus } from 'shre-sdk/events';
 import { createHeartbeatMonitor } from 'shre-sdk/heartbeat';
@@ -2002,6 +2003,110 @@ async function handleWorkspaceMembersCompat(req: IncomingMessage, res: ServerRes
     }
     json(res, 405, { error: 'Method not allowed' });
   } catch (error) { json(res, 500, { error: error instanceof Error ? error.message : 'Workspace member request failed' }); }
+}
+
+// ── Platform console (founder-only, read-only) ──────────────────
+// Cross-tenant visibility for the platform operator. Gated by the
+// PLATFORM_ADMIN_EMAILS allow-list (see src/platform-admin.ts) — empty env
+// means these routes 404 like the feature doesn't exist. v1 is strictly
+// read-only; any future mutating action gets its own explicit route + audit.
+
+const platformAdmins = parsePlatformAdmins(process.env.PLATFORM_ADMIN_EMAILS);
+
+async function requirePlatformAdmin(req: IncomingMessage, res: ServerResponse): Promise<{ userId: string; email: string } | null> {
+  if (platformAdmins.size === 0) { json(res, 404, { error: 'not found' }); return null; }
+  const auth = await authenticateRequest(req);
+  if (!auth) { json(res, 401, { error: 'Authentication required' }); return null; }
+  const supabase = createSupabaseAdmin();
+  const { data } = await supabase.auth.admin.getUserById(auth.userId);
+  const email = data?.user?.email || null;
+  if (!isPlatformAdmin(email, platformAdmins)) { json(res, 404, { error: 'not found' }); return null; }
+  return { userId: auth.userId, email: email as string };
+}
+
+async function handlePlatformConsole(req: IncomingMessage, res: ServerResponse, section: string, tenantId?: string): Promise<void> {
+  const admin = await requirePlatformAdmin(req, res);
+  if (!admin) return;
+  const supabase = createSupabaseAdmin();
+  await auditLog({ userId: admin.userId, action: 'platform.console_access', resource: tenantId ? `${section}:${tenantId}` : section, detail: {}, ip: getClientIp(req) });
+
+  try {
+    if (section === 'overview') {
+      const [tenants, members, connectors, snapshots] = await Promise.all([
+        supabase.from('tenants').select('id', { count: 'exact', head: true }),
+        supabase.from('tenant_members').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+        supabase.from('tenant_connectors').select('status'),
+        supabase.from('store_snapshots').select('captured_at').order('captured_at', { ascending: false }).limit(1),
+      ]);
+      const byStatus: Record<string, number> = {};
+      for (const row of connectors.data || []) byStatus[row.status] = (byStatus[row.status] || 0) + 1;
+      return json(res, 200, {
+        tenants: tenants.count || 0,
+        activeMemberships: members.count || 0,
+        connectors: byStatus,
+        newestSnapshotAt: snapshots.data?.[0]?.captured_at || null,
+      });
+    }
+
+    if (section === 'tenants' && !tenantId) {
+      const [tenants, members, connectors] = await Promise.all([
+        supabase.from('tenants').select('id,name,plan,status,pos_system,store_count,onboarding_completed,created_at').order('created_at', { ascending: false }).limit(200),
+        supabase.from('tenant_members').select('tenant_id,status'),
+        supabase.from('tenant_connectors').select('tenant_id,status'),
+      ]);
+      if (tenants.error) throw tenants.error;
+      const memberCount = new Map<string, number>();
+      for (const m of members.data || []) if (m.status === 'active') memberCount.set(m.tenant_id, (memberCount.get(m.tenant_id) || 0) + 1);
+      const connSummary = new Map<string, { total: number; connected: number }>();
+      for (const c of connectors.data || []) {
+        const entry = connSummary.get(c.tenant_id) || { total: 0, connected: 0 };
+        entry.total += 1; if (c.status === 'connected') entry.connected += 1;
+        connSummary.set(c.tenant_id, entry);
+      }
+      return json(res, 200, {
+        tenants: (tenants.data || []).map((t) => ({
+          ...t,
+          members: memberCount.get(t.id) || 0,
+          connectors: connSummary.get(t.id) || { total: 0, connected: 0 },
+        })),
+      });
+    }
+
+    if (section === 'tenants' && tenantId) {
+      const [tenant, members, connectors, onboarding, audit] = await Promise.all([
+        supabase.from('tenants').select('id,name,plan,status,pos_system,store_count,onboarding_completed,created_at,timezone,currency').eq('id', tenantId).maybeSingle(),
+        supabase.from('tenant_members').select('id,user_id,role,status,joined_at').eq('tenant_id', tenantId).order('joined_at', { ascending: true }),
+        supabase.from('tenant_connectors').select('id,name,type,status,last_tested,last_error,created_at').eq('tenant_id', tenantId),
+        supabase.from('workspace_onboarding_state').select('phase,model,store,sync,capabilities,completed_at').eq('tenant_id', tenantId).maybeSingle(),
+        supabase.from('audit_log').select('action,resource,user_id,ip,created_at').eq('tenant_id', tenantId).order('created_at', { ascending: false }).limit(20),
+      ]);
+      if (!tenant.data) return json(res, 404, { error: 'Tenant not found' });
+      const enrichedMembers = await Promise.all((members.data || []).map(async (m) => {
+        const { data } = await supabase.auth.admin.getUserById(m.user_id);
+        return { ...m, email: data?.user?.email || null, name: data?.user?.user_metadata?.full_name || data?.user?.user_metadata?.name || null };
+      }));
+      return json(res, 200, {
+        tenant: tenant.data,
+        members: enrichedMembers,
+        connectors: connectors.data || [],
+        onboarding: onboarding.data || null,
+        recentAudit: audit.data || [],
+      });
+    }
+
+    if (section === 'audit') {
+      const limit = Math.max(1, Math.min(200, Number(getRequestUrl(req).searchParams.get('limit')) || 100));
+      const { data, error } = await supabase.from('audit_log').select('tenant_id,user_id,action,resource,ip,created_at').order('created_at', { ascending: false }).limit(limit);
+      if (error) throw error;
+      return json(res, 200, { entries: data || [] });
+    }
+
+    json(res, 404, { error: 'not found' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : (err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : 'Platform console request failed');
+    console.error('[platform.console]', message);
+    json(res, 500, { error: message });
+  }
 }
 
 // ── Dashboard ───────────────────────────────────────────────────
@@ -4192,6 +4297,8 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (workspaceCompatMatch && ['GET', 'PATCH'].includes(method)) return handleWorkspaceCompat(req, res, workspaceCompatMatch[1]);
   const workspaceMembersMatch = pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)\/members(?:\/([0-9a-f-]+)(?:\/role)?)?$/);
   if (workspaceMembersMatch && ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return handleWorkspaceMembersCompat(req, res, workspaceMembersMatch[1], workspaceMembersMatch[2]);
+  const platformMatch = pathname.match(/^\/api\/platform\/(overview|tenants|audit)(?:\/([0-9a-f-]+))?$/);
+  if (platformMatch && method === 'GET') return handlePlatformConsole(req, res, platformMatch[1], platformMatch[2]);
   const workspaceRolesMatch = pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)\/roles$/);
   if (workspaceRolesMatch && method === 'GET') return handleWorkspaceMembersCompat(req, res, workspaceRolesMatch[1]);
   if (pathname === '/api/apps' && method === 'GET') return handlePlatformApps(req, res);

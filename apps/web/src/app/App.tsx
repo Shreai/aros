@@ -21,6 +21,7 @@ import { ConnectStorePage } from '../pages/connect/ConnectStorePage';
 import { ConnectStoreBanner } from '../components/ConnectStoreBanner';
 import { ResetPassword } from '../pages/ResetPassword';
 import { AcceptInvite } from '../pages/AcceptInvite';
+import { PlatformConsole } from '../pages/PlatformConsole';
 import { VerifyEmail } from '../pages/VerifyEmail';
 import { ConnectionsHub } from '../pages/settings/ConnectionsHub';
 import { AdministrationPage } from '../pages/settings/AdministrationPage';
@@ -112,6 +113,12 @@ function AppContent() {
   // itself waits for supabase-js to consume the invite tokens from the hash.
   if (path === '/auth/accept') {
     return <AcceptInvite />;
+  }
+
+  // Founder-only platform console; the server allow-list is the real gate —
+  // for everyone else this renders the same "not available" shell.
+  if (path === '/platform') {
+    return <PlatformConsole />;
   }
 
   if (path === '/verify-email') {
