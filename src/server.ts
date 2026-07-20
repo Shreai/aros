@@ -66,7 +66,7 @@ import { handleEdgeProvisioningRequest } from './edge/provisioning-http.js';
 import { EdgeProvisioningService } from './edge/provisioning.js';
 import { SupabaseEdgeProvisioningRepository } from './edge/supabase-provisioning-repository.js';
 import { createOidcRelyingParty } from './auth/oidc-rp.js';
-import { DEFAULT_SHRE_ID_PROJECT_ID, bundleConnectorMode, resolveBundle } from './auth/role-bundle.js';
+import { DEFAULT_SHRE_ID_PROJECT_ID, bundleConnectorMode, effectiveAppSkills, resolveBundle } from './auth/role-bundle.js';
 import { createMemoryOidcStore, createSupabaseOidcStore } from './auth/oidc-store.js';
 
 const PORT = Number(process.env.PORT || 5457);
@@ -1714,10 +1714,13 @@ async function handlePlatformApps(req: IncomingMessage, res: ServerResponse, app
   if (!auth) return json(res, 401, { error: 'Authentication required' });
   const supabase = createSupabaseAdmin();
   if (req.method === 'GET') {
-    const [{ data: apps, error }, { data: grants }] = await Promise.all([supabase.from('platform_apps').select('*').order('name'), supabase.from('marketplace_app_entitlements').select('app_key,status,service_config').eq('tenant_id', auth.tenantId)]);
+    const [{ data: apps, error }, { data: grants }] = await Promise.all([supabase.from('platform_apps').select('*').order('name'), supabase.from('marketplace_app_entitlements').select('app_key,status,service_config,role_mapping').eq('tenant_id', auth.tenantId)]);
     // Publish each app's capability bundle so the marketplace can show what
-    // activation unlocks (skills/agents/tools) before the user commits.
-    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: (apps || []).map(app => ({ ...app, bundle: APP_CAPABILITY_BUNDLES[app.id] || null })), grants: grants || [] });
+    // activation unlocks (skills/agents/tools) before the user commits —
+    // plus effective_skills: what THIS caller's role bundle actually gets
+    // (tenant role_mapping override > preset rule > no bundle = none).
+    const roleMappingByApp = new Map((grants || []).map(g => [g.app_key, (g as { role_mapping?: Record<string, { skills?: string[] }> | null }).role_mapping ?? null]));
+    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: (apps || []).map(app => { const capability = APP_CAPABILITY_BUNDLES[app.id] || null; return { ...app, bundle: capability, effective_skills: capability ? effectiveAppSkills(auth.bundle, capability.skills.map(s => s.name), roleMappingByApp.get(app.id)) : [] }; }), grants: (grants || []).map(({ role_mapping: _rm, ...rest }) => rest) });
   }
   if (!appId) return json(res, 400, { error: 'app id required' });
   if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });

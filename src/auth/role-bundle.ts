@@ -138,6 +138,29 @@ export function bundleAllowedSkills(bundleId: string | null, catalog: Iterable<s
 }
 
 /**
+ * Per-bundle effective skills for one app (task: per-bundle grants).
+ *
+ * Resolution order:
+ * 1. Tenant override — `marketplace_app_entitlements.role_mapping` shaped
+ *    `{ "<bundle-id>": { "skills": ["name", …] } }`. When present for the
+ *    caller's bundle it REPLACES the preset rule for this app (this is how
+ *    a tenant narrows or widens one app for one role without forking
+ *    presets). An empty override list means none — fail closed, honored.
+ * 2. Preset rule — `bundleAllowedSkills` over the app's skill names.
+ * 3. No/unknown bundle — empty (most restricted), never the full set.
+ */
+export function effectiveAppSkills(
+  bundleId: string | null,
+  appSkillNames: readonly string[],
+  roleMapping?: Record<string, { skills?: string[] }> | null,
+): string[] {
+  const override = bundleId ? roleMapping?.[bundleId]?.skills : undefined;
+  if (Array.isArray(override)) return appSkillNames.filter(name => override.includes(name));
+  const allowed = bundleAllowedSkills(bundleId, appSkillNames);
+  return allowed ? appSkillNames.filter(name => allowed.has(name)) : [];
+}
+
+/**
  * Is this connector surfaced to the bundle, and in which mode?
  * Rules (contract §connectors): a bundle can only narrow the tenant's
  * installed set; enabled-but-unmapped connectors default to read_only
