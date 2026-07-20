@@ -106,3 +106,32 @@ describe('bundle semantics from vendored presets', () => {
     expect(bundleConnectorMode(null, 'rapidrms-api')).toBeNull(); // no bundle = restrict
   });
 });
+
+describe('effectiveAppSkills (per-bundle grants: override > preset > none)', () => {
+  const APP_SKILLS = ['shift-recap', 'inventory-count', 'payroll', 'sales-report'];
+
+  it('preset rule intersects the app skills', async () => {
+    const { effectiveAppSkills } = await import('../auth/role-bundle');
+    expect(effectiveAppSkills('store-manager', APP_SKILLS)).toEqual(['shift-recap', 'inventory-count']);
+    expect(effectiveAppSkills('owner', APP_SKILLS)).toEqual(APP_SKILLS); // wildcard
+  });
+
+  it('tenant role_mapping override replaces the preset rule for that bundle', async () => {
+    const { effectiveAppSkills } = await import('../auth/role-bundle');
+    const mapping = { 'store-manager': { skills: ['payroll', 'shift-recap'] } };
+    expect(effectiveAppSkills('store-manager', APP_SKILLS, mapping)).toEqual(['shift-recap', 'payroll']);
+    // Other bundles are untouched by another bundle's override.
+    expect(effectiveAppSkills('owner', APP_SKILLS, mapping)).toEqual(APP_SKILLS);
+  });
+
+  it('an empty override means none — honored, fail closed', async () => {
+    const { effectiveAppSkills } = await import('../auth/role-bundle');
+    expect(effectiveAppSkills('store-manager', APP_SKILLS, { 'store-manager': { skills: [] } })).toEqual([]);
+  });
+
+  it('no/unknown bundle gets nothing, never the full set', async () => {
+    const { effectiveAppSkills } = await import('../auth/role-bundle');
+    expect(effectiveAppSkills(null, APP_SKILLS)).toEqual([]);
+    expect(effectiveAppSkills('not-a-bundle', APP_SKILLS)).toEqual([]);
+  });
+});
