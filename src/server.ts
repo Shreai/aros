@@ -2848,17 +2848,27 @@ async function handleConnectorsTest(req: IncomingMessage, res: ServerResponse): 
       })
       .eq('id', row.id);
 
+    // Onboarding-state tracking is best-effort: the connection test verdict
+    // above is authoritative, and a failed journey-state write (e.g. the
+    // set_workspace_onboarding_component migration not applied yet) must not
+    // turn a successfully connected store into a user-facing failure.
+    try {
+      if (result.success) {
+        await setOnboardingComponent(auth.tenantId, 'store', 'ready', {
+          connectorId: row.id, connectorType: row.type,
+        });
+        await setOnboardingComponent(auth.tenantId, 'sync', 'pending', { connectorId: row.id });
+      } else {
+        await setOnboardingComponent(auth.tenantId, 'store', 'error', { connectorId: row.id }, result.error ?? 'Connection test failed');
+      }
+    } catch (stateErr) {
+      console.error('[connectors.test] onboarding-state update failed:', connectorErrorMessage(stateErr, 'unknown'));
+    }
     if (result.success) {
-      await setOnboardingComponent(auth.tenantId, 'store', 'ready', {
-        connectorId: row.id, connectorType: row.type,
-      });
-      await setOnboardingComponent(auth.tenantId, 'sync', 'pending', { connectorId: row.id });
       // Day-0 brief: kick the digest engine now that a store is connected, so
       // the owner's first Home visit already has a Weekly Brief. Fire-and-
       // forget — see requestFirstRunDigest; never blocks or fails activation.
       void requestFirstRunDigest(auth.tenantId);
-    } else {
-      await setOnboardingComponent(auth.tenantId, 'store', 'error', { connectorId: row.id }, result.error ?? 'Connection test failed');
     }
     // A newly-connected (or newly-broken) connector should reflect on the
     // dashboard immediately, not after the summary TTL expires.
