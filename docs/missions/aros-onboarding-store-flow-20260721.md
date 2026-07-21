@@ -31,11 +31,12 @@
 - Local gate: `pnpm --filter @aros/web typecheck` passed.
 - Integration gate: `pnpm --filter @aros/web build` passed.
 - Real-flow smoke/E2E: live `https://app.aros.live/onboarding` served bundle `/assets/index-CYpgw9Xm.js` containing the new store-flow strings and timeout; existing connected workspace settled to readiness with no console errors.
+- Disposable live QA: created workspace `172b8e3d-a5f3-4aba-8ae9-2b1997c1de6d` via `/api/signup`, selected the managed model, saved two stores through `/api/connectors` (`rapidrms-api` and `verifone-commander`) with fake save-only credentials, and reached onboarding step 4. Follow-up backend patch marks saved stores as canonical `store:pending`, so status no longer stays `store:not_started` after setup save.
 - Reviewer agents: not used.
 - Evidence location: final response and this file.
 
 ## Handoff
-- Current state: live hot patch applied and source branch prepared.
-- Remaining gaps: run a brand-new QA workspace through the connect stage with test credentials to validate connector-save behavior end to end.
+- Current state: live hot patch applied and source branch prepared; brand-new disposable QA workspace passed the connector-save path.
+- Remaining gaps: none for the requested store-by-store onboarding setup gap.
 - Follow-up queue: reconcile live/direct-deploy with `main` normally so future deploys do not lose hot patches.
 - Memory/update target: `.claude/projects/C--Users-nirpa/memory/stm_aros_validation_sweep_2026-07-21.md`.
