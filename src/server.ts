@@ -285,7 +285,7 @@ function readTaskToken(): string {
   return '';
 }
 
-async function proxyRequest(req: IncomingMessage, res: ServerResponse, baseUrl: string): Promise<void> {
+async function proxyRequest(req: IncomingMessage, res: ServerResponse, baseUrl: string, jsonBody?: Record<string, unknown> | null): Promise<void> {
   const current = requestUrl(req);
   const upstreamPath = current.pathname.replace(/^\/sx-tasks(?=\/|$)/, '') || '/';
   const upstreamUrl = new URL(upstreamPath, baseUrl);
@@ -332,7 +332,12 @@ async function proxyRequest(req: IncomingMessage, res: ServerResponse, baseUrl: 
     }
   }
 
-  const body = ['GET', 'HEAD'].includes(req.method || 'GET') ? undefined : req;
+  const body = ['GET', 'HEAD'].includes(req.method || 'GET')
+    ? undefined
+    : jsonBody !== undefined
+      ? JSON.stringify(jsonBody)
+      : req;
+  if (jsonBody !== undefined) headers.set('content-type', 'application/json');
   const upstream = await fetch(upstreamUrl, {
     method: req.method,
     headers,
@@ -3042,6 +3047,117 @@ async function handleStoreSales(req: IncomingMessage, res: ServerResponse): Prom
   }
 }
 
+function nyBusinessDate(daysAgo = 0): string {
+  const now = new Date();
+  const nyDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  nyDate.setDate(nyDate.getDate() - daysAgo);
+  return [
+    nyDate.getFullYear(),
+    String(nyDate.getMonth() + 1).padStart(2, '0'),
+    String(nyDate.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function chatLatestText(body: Record<string, unknown> | null): string {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as Record<string, unknown>;
+    if (message?.role && message.role !== 'user') continue;
+    const content = message?.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      const text = content
+        .map((part) => typeof part === 'string' ? part : String((part as Record<string, unknown>)?.text ?? ''))
+        .join(' ')
+        .trim();
+      if (text) return text;
+    }
+  }
+  return String(body?.message ?? body?.input ?? body?.prompt ?? '');
+}
+
+function arosChatTenant(req: IncomingMessage, body: Record<string, unknown> | null): string {
+  const header = (name: string) => {
+    const value = req.headers[name];
+    return Array.isArray(value) ? value[0] : value;
+  };
+  return String(
+    body?.tenantId ||
+    body?.workspaceId ||
+    body?.tenant_id ||
+    body?.workspace_id ||
+    header('x-aros-tenant-id') ||
+    header('x-workspace-id') ||
+    header('x-tenant-id') ||
+    '',
+  ).trim();
+}
+
+function isArosSalesChat(req: IncomingMessage, body: Record<string, unknown> | null): boolean {
+  const agentId = String(body?.agentId ?? body?.agent_id ?? '').toLowerCase();
+  const channel = String(req.headers['x-channel'] ?? '').toLowerCase();
+  const text = chatLatestText(body).toLowerCase();
+  const arosContext = agentId === 'aros-agent' || channel === 'aros';
+  return arosContext &&
+    /\b(sales?|revenue|transactions?|average ticket|total)\b/.test(text) &&
+    !/\b(inventory|stock|item|items|invoice|invoices|edi|exception|void|refund)\b/.test(text);
+}
+
+async function handleArosSalesChat(req: IncomingMessage, res: ServerResponse, body: Record<string, unknown> | null): Promise<boolean> {
+  if (!isArosSalesChat(req, body)) return false;
+  const tenantId = arosChatTenant(req, body);
+  if (!UUID_RE.test(tenantId)) return false;
+
+  const text = chatLatestText(body).toLowerCase();
+  const to = /\byesterday\b/.test(text) ? nyBusinessDate(1) : nyBusinessDate();
+  const from = to;
+
+  try {
+    const supabase = createSupabaseAdmin();
+    const { data: rows } = await supabase
+      .from('tenant_connectors')
+      .select(`${CONNECTOR_COLUMNS}, credentials_encrypted`)
+      .eq('tenant_id', tenantId)
+      .eq('type', 'rapidrms-api')
+      .eq('status', 'connected')
+      .limit(1);
+    const row = rows?.[0];
+    if (!row) {
+      json(res, 200, {
+        content: 'No connected RapidRMS store is mapped to this workspace yet.',
+        _shre: { model: 'aros-store-data', toolsUsed: ['mib_sales_today'], mode: 'aros-sales-direct', connected: false },
+      });
+      return true;
+    }
+
+    ensureConnectorCrypto();
+    const secrets = JSON.parse(decryptValue(row.credentials_encrypted)) as Record<string, string>;
+    const daily = await fetchStoreSalesRange({ id: row.id, type: row.type, name: row.name, config: row.config || {}, secrets }, vaultSecretFor(tenantId), from, to);
+    const totals = daily.reduce((sum, day) => ({ revenue: sum.revenue + day.revenue, transactions: sum.transactions + day.transactions }), { revenue: 0, transactions: 0 });
+    const revenue = Math.round(totals.revenue * 100) / 100;
+    const averageTicket = totals.transactions ? Math.round((revenue / totals.transactions) * 100) / 100 : 0;
+    const label = /\byesterday\b/.test(text) ? `on ${to}` : 'today';
+
+    for (const day of daily) {
+      await supabase.from('store_snapshots').upsert({ tenant_id: tenantId, connector_id: row.id, business_date: day.businessDate, captured_at: new Date().toISOString(), revenue: day.revenue, transactions: day.transactions, low_stock_count: 0, low_stock_items: [], source: { type: row.type, name: row.name }, partial: false }, { onConflict: 'tenant_id,business_date' });
+      void replicateSnapshotToCortex({ tenantId, connectorId: row.id, businessDate: day.businessDate, revenue: day.revenue, transactions: day.transactions, lowStockCount: 0, source: { type: row.type, name: row.name }, partial: false });
+    }
+
+    json(res, 200, {
+      content: `**${row.name}** ${label}:\n- Total Sales: **$${revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}**\n- Transactions: **${totals.transactions.toLocaleString('en-US')}**\n- Average Ticket: **$${averageTicket.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}**`,
+      _shre: { model: 'aros-store-data', toolsUsed: [/\byesterday\b/.test(text) ? 'mib_sales_summary' : 'mib_sales_today'], mode: 'aros-sales-direct', tenantId, from, to, source: 'RapidRMS API' },
+    });
+    return true;
+  } catch (err) {
+    console.error('[aros-sales-chat]', err instanceof Error ? err.message : err);
+    json(res, 200, {
+      content: 'RapidRMS sales data could not be retrieved right now.',
+      _shre: { model: 'aros-store-data', toolsUsed: ['mib_sales_today'], mode: 'aros-sales-direct', error: 'sales_unavailable' },
+    });
+    return true;
+  }
+}
+
 // ── Store risk / exception reads (backing the mcp-aros operator tools) ──
 // Read-only, tenant-scoped like /api/store/summary. Both iterate EVERY
 // connected connector and degrade per store: connector types without a data
@@ -4406,6 +4522,12 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname.startsWith('/api/v1/')) {
     req.url = pathname.slice('/api'.length) + requestUrl.search;
     return proxyRequest(req, res, SHRE_ROUTER_URL);
+  }
+
+  if (pathname === '/v1/chat' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (await handleArosSalesChat(req, res, body)) return;
+    return proxyRequest(req, res, SHRE_ROUTER_URL, body);
   }
 
   if (pathname.startsWith('/v1/') && !pathname.startsWith('/v1/traces/')) {
