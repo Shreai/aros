@@ -3894,6 +3894,16 @@ async function handleConnectorsCreate(req: IncomingMessage, res: ServerResponse)
 
     if (error) throw error;
 
+    try {
+      await setOnboardingComponent(auth.tenantId, 'store', 'pending', {
+        connectorId: data.id,
+        connectorType: data.type,
+        connectorName: data.name,
+      });
+    } catch (stateErr) {
+      console.error('[connectors.create] onboarding-state update failed:', connectorErrorMessage(stateErr, 'unknown'));
+    }
+
     await auditLog({
       tenantId: auth.tenantId,
       userId: auth.userId,
