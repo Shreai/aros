@@ -21,6 +21,8 @@ Status date: 2026-07-21
 - [x] Cart, checkout, order, payment, POS-write, connector-write, and external-page-write paths are removed from Regulars.
 - [x] Local tests passed: 29 targeted marketplace/read-only tests.
 - [x] Local typecheck passed.
+- [x] Feature branch pushed: `feat/business-profile-regulars-readonly`.
+- [x] PR opened: `https://github.com/Nirlabinc/aros/pull/142`.
 - [ ] Deploy branch `feat/business-profile-regulars-readonly` to beta MCP host.
 - [x] Confirm current live `https://mcp.shre.ai/health` returns OK.
 - [x] Confirm current live `https://mcp.shre.ai/.well-known/mcp/operator` returns OK.
@@ -78,7 +80,12 @@ Status date: 2026-07-21
 
 - Passed `pnpm exec vitest run src/__tests__/mcp-aros-tools.test.ts src/__tests__/public-customer-api.test.ts`.
 - Passed `pnpm typecheck`.
+- Passed `pnpm --filter @aros/mcp-aros build`.
+- Passed `pnpm --filter @aros/mcp-aros verify:oauth` against live metadata; authenticated token test is pending marketplace OAuth setup.
 - Passed JSON validation for ChatGPT and Claude marketplace metadata.
+- Committed `1907edb Prepare AROS and Regulars marketplace launch`.
+- Pushed branch `feat/business-profile-regulars-readonly` to `origin`.
+- Opened PR `https://github.com/Nirlabinc/aros/pull/142`.
 - Live endpoint audit:
   - `https://mcp.shre.ai/health` returned 200.
   - `https://mcp.shre.ai/.well-known/mcp/operator` returned 200.
