@@ -29,6 +29,7 @@ Every spec defaults to **Ramesh** unless it says otherwise:
 | 4 | [check-on-my-store-today.md](check-on-my-store-today.md) | "How's my store doing?" — the daily look: briefing, numbers, anything needing attention. |
 | 5 | [get-unstuck.md](get-unstuck.md) | "Something's wrong" — every failure on journeys 1–4 recovers self-service. |
 | 6 | [accept-terms-and-ai-disclosure.md](accept-terms-and-ai-disclosure.md) | "Fine, I agree" — clickwrap terms gate + first-chat AI disclosure. **Flagged off** (`TERMS_GATE_ENABLED`) until attorney sign-off. |
+| 7 | [install-an-app-from-marketplace.md](install-an-app-from-marketplace.md) | "I want that" — find an app (Documents, EDI Invoices) in the Marketplace, activate it, open it. |
 
 ## How they're enforced
 

@@ -26,9 +26,15 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'health', label: 'Connection Health', glyph: 'H' },
 ];
 
+// In-shell marketplace apps: rendered inside the shell when the workspace has
+// an active entitlement (installed from Marketplace), surfaced as dynamic nav
+// entries — not part of the fixed workspace nav.
+export const EMBEDDED_APP_NAV: Record<'documents' | 'edi-invoices', NavItem> = {
+  documents: { key: 'documents', label: 'Documents', glyph: 'Dc' },
+  'edi-invoices': { key: 'edi-invoices', label: 'EDI Invoices', glyph: 'ED' },
+};
+
 export const WORKSPACE_NAV: NavItem[] = [
-  { key: 'documents', label: 'Documents', glyph: 'Dc' },
-  { key: 'edi-invoices', label: 'EDI Invoices', glyph: 'ED' },
   { key: 'team', label: 'Team', glyph: 'Tm' },
   { key: 'billing', label: 'Billing', glyph: 'Bi' },
   { key: 'usage', label: 'Usage', glyph: 'Us' },
