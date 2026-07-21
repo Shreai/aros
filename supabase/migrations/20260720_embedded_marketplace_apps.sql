@@ -16,10 +16,7 @@ ON CONFLICT(id) DO UPDATE SET
   vault_namespace=EXCLUDED.vault_namespace, required_scopes=EXCLUDED.required_scopes,
   status=EXCLUDED.status, description=EXCLUDED.description, embedded=EXCLUDED.embedded;
 
--- Existing workspaces were using Documents/EDI while they were fixed nav
--- entries; grandfather them in so the IA change removes nothing they had.
-INSERT INTO public.marketplace_app_entitlements (tenant_id, app_key, status, source, enabled_at, role_mapping, service_config, metadata)
-SELECT t.id, app.key, 'active', 'migration-grandfather', now(), '{}'::jsonb, '{}'::jsonb, '{"nodeId":"' || app.key || '"}'::jsonb
-FROM public.tenants t
-CROSS JOIN (VALUES ('documents'), ('edi-invoices')) AS app(key)
-ON CONFLICT (tenant_id, app_key) DO NOTHING;
+-- Deliberately NO grandfathering (founder decision 2026-07-20): existing
+-- tenants start clean and install Documents / EDI Invoices explicitly from
+-- the Marketplace. Tenants that already activated `documents` through the
+-- marketplace keep their entitlement untouched.

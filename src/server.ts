@@ -3899,8 +3899,9 @@ async function resolveMibDocsAccess(tenantId: string): Promise<{ workspaceId: st
       .eq('tenant_id', tenantId)
       .eq('app_key', DOCUMENTS_APP_KEY)
       .maybeSingle();
-    // Grandfathered/migration entitlements are active but have no minted token
-    // yet — provision on first use so they don't need a manual re-activation.
+    // An active entitlement can lack a minted token (activation ran before the
+    // MIB env was configured, or the mint failed) — provision on first use so
+    // it never needs a manual re-activation.
     if (data && data.status === 'active') {
       const cfg0 = isRecord(data.service_config) ? data.service_config as Record<string, unknown> : {};
       if (typeof cfg0.mibServiceTokenEnc !== 'string' || !cfg0.mibServiceTokenEnc) {

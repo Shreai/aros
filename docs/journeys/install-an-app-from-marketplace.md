@@ -36,8 +36,9 @@ opening it lands on the app's real page — no "not installed" screen.
 
 ## Activation dependencies
 - Migration `20260720_embedded_marketplace_apps.sql` applied (adds
-  `platform_apps.embedded` + `description`, seeds `documents`/`edi-invoices`,
-  grandfathers existing tenants so nobody loses access they had).
+  `platform_apps.embedded` + `description`, seeds `documents`/`edi-invoices`).
+  No grandfathering (founder decision 2026-07-20): every workspace — existing
+  or new — installs these apps explicitly from the Marketplace.
 - `/api/apps`, `/api/marketplace/entitlements`, `/api/marketplace/install`,
   `/api/apps/:id/grant` live (all pre-existing).
 - Documents needs `MIB_DOCS_BASE_URL` + `MIB_DOCS_ADMIN_TOKEN` server-side for

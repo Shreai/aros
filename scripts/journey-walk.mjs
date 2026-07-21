@@ -195,7 +195,7 @@ const JOURNEYS = [
       ['app catalog API wired + fail-closed', closedApi('GET', '/api/apps')],
       ['entitlements API wired + fail-closed', closedApi('GET', '/api/marketplace/entitlements')],
       ['install API wired + fail-closed', closedApi('POST', '/api/marketplace/install', {})],
-      ['activate → Active card → Open lands on the app page; uninstalled deep-link shows install prompt', browser('needs an owner session — verify Documents/EDI gate + grandfathered tenants keep access')],
+      ['activate → Active card → Open lands on the app page; uninstalled deep-link shows install prompt', browser('needs an owner session — verify Documents/EDI gate before AND after installing (no grandfathering: all tenants start uninstalled)')],
     ],
   },
   {
