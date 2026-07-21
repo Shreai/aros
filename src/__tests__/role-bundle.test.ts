@@ -70,11 +70,23 @@ describe('legacy membership fallback + resolution order', () => {
   });
 
   it('ambiguous claims do NOT fall through to a wider fallback silently', () => {
-    // Two bundle roles = misconfiguration; deriveBundle yields null and the
-    // fallback then applies to the MEMBERSHIP role — for a member that is
-    // null (restricted), never a bundle picked from the ambiguous pair.
+    // Two bundle roles = misconfiguration; resolveBundle yields null.
     const claims = { [ROLES_CLAIM]: { 'bundle:owner': {}, 'bundle:shift-lead': {} } };
     expect(resolveBundle(claims, 'member', PROJECT)).toBeNull();
+  });
+
+  it('ambiguous claims fail closed even for owner/admin — no widening to owner (regression)', () => {
+    // The real trap: an owner/admin deliberately narrowed by ONE bundle role
+    // must not revert to full 'owner' by making their claim ambiguous. Before
+    // the fix, resolveBundle fell through to fallbackBundleForRole('owner').
+    const ambiguous = { [ROLES_CLAIM]: { 'bundle:shift-lead': {}, 'bundle:bookkeeper': {} } };
+    expect(resolveBundle(ambiguous, 'owner', PROJECT)).toBeNull();
+    expect(resolveBundle(ambiguous, 'admin', PROJECT)).toBeNull();
+    // Sanity: a SINGLE narrowing role still wins over the owner fallback,
+    // and ZERO bundle roles still gets the legacy owner fallback.
+    const single = { [ROLES_CLAIM]: { 'bundle:shift-lead': {} } };
+    expect(resolveBundle(single, 'owner', PROJECT)).toBe('shift-lead');
+    expect(resolveBundle({}, 'owner', PROJECT)).toBe('owner');
   });
 });
 

@@ -67,14 +67,21 @@ export function fallbackBundleForRole(membershipRole: string | null | undefined)
 /**
  * The one resolution rule every AROS auth path uses: Zitadel claims win when
  * they name a bundle; otherwise the legacy membership fallback applies.
+ *
+ * Fail closed on AMBIGUITY: the membership fallback applies ONLY when the
+ * claims name ZERO bundle roles. If the claims are ambiguous (≥2 bundle
+ * roles) the bundle is null — never widened back to the membership fallback
+ * (which would let an owner/admin revert a deliberate single-bundle narrowing
+ * by making their claim ambiguous). One candidate → that bundle.
  */
 export function resolveBundle(
   claims: Record<string, unknown> | null | undefined,
   membershipRole: string | null | undefined,
   projectId: string,
 ): string | null {
-  const fromClaims = deriveBundleFromClaims(claims, projectId).bundle;
-  return fromClaims ?? fallbackBundleForRole(membershipRole);
+  const { bundle, candidates } = deriveBundleFromClaims(claims, projectId);
+  if (candidates.length > 0) return bundle; // 1 → that bundle; ≥2 → null (ambiguous, fail closed)
+  return fallbackBundleForRole(membershipRole); // no bundle role at all → legacy membership fallback
 }
 
 // ── Bundle semantics (vendored contract data) ───────────────────────────────
