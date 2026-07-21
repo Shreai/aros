@@ -923,6 +923,12 @@ async function setOnboardingComponent(
 }
 
 async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Fail closed: unauthenticated callers get 401 before any parameter
+  // validation can leak endpoint shape (journey-walk J1/J2 seam).
+  if (!req.headers.authorization) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const tenantId = url.searchParams.get('tenantId');
 
@@ -973,6 +979,10 @@ async function handleOnboardingStatus(req: IncomingMessage, res: ServerResponse)
 }
 
 async function handleOnboardingComplete(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!req.headers.authorization?.startsWith('Bearer ')) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
   const body = await parseJsonBody(req);
   if (!body) return json(res, 400, { error: 'Invalid JSON' });
 
@@ -1056,6 +1066,10 @@ async function handleOnboardingComplete(req: IncomingMessage, res: ServerRespons
 }
 
 async function handleOnboardingProgress(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!req.headers.authorization) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
   const body = await parseJsonBody(req);
   if (!body) return json(res, 400, { error: 'Invalid JSON' });
 
@@ -1110,6 +1124,10 @@ async function handleOnboardingProgress(req: IncomingMessage, res: ServerRespons
 }
 
 async function handleOnboardingComponent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!req.headers.authorization) {
+    return json(res, 401, { error: 'Authentication required' });
+  }
+
   const body = await parseJsonBody(req);
   if (!body) return json(res, 400, { error: 'Invalid JSON' });
   const tenantId = typeof body.tenantId === 'string' ? body.tenantId : '';
