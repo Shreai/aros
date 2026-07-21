@@ -184,6 +184,21 @@ const JOURNEYS = [
     ],
   },
   {
+    slug: 'install-an-app-from-marketplace',
+    title: 'J7 Install an app (Documents / EDI Invoices) from the Marketplace',
+    steps: [
+      ['/marketplace page', page('/marketplace')],
+      ['/connectors page', page('/connectors')],
+      ['/plugins page', page('/plugins')],
+      ['/documents page', page('/documents')],
+      ['/edi-invoices page', page('/edi-invoices')],
+      ['app catalog API wired + fail-closed', closedApi('GET', '/api/apps')],
+      ['entitlements API wired + fail-closed', closedApi('GET', '/api/marketplace/entitlements')],
+      ['install API wired + fail-closed', closedApi('POST', '/api/marketplace/install', {})],
+      ['activate → Active card → Open lands on the app page; uninstalled deep-link shows install prompt', browser('needs an owner session — verify Documents/EDI gate before AND after installing (no grandfathering: all tenants start uninstalled)')],
+    ],
+  },
+  {
     slug: 'get-unstuck',
     title: 'J5 Get unstuck',
     steps: [

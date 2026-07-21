@@ -4040,12 +4040,27 @@ async function resolveMibDocsAccess(tenantId: string): Promise<{ workspaceId: st
   // Preferred: the per-tenant token minted at Documents activation.
   try {
     const supabase = createSupabaseAdmin();
-    const { data } = await supabase
+    let { data } = await supabase
       .from('marketplace_app_entitlements')
       .select('status, service_config')
       .eq('tenant_id', tenantId)
       .eq('app_key', DOCUMENTS_APP_KEY)
       .maybeSingle();
+    // An active entitlement can lack a minted token (activation ran before the
+    // MIB env was configured, or the mint failed) — provision on first use so
+    // it never needs a manual re-activation.
+    if (data && data.status === 'active') {
+      const cfg0 = isRecord(data.service_config) ? data.service_config as Record<string, unknown> : {};
+      if (typeof cfg0.mibServiceTokenEnc !== 'string' || !cfg0.mibServiceTokenEnc) {
+        await provisionDocumentsAccess(supabase, tenantId);
+        ({ data } = await supabase
+          .from('marketplace_app_entitlements')
+          .select('status, service_config')
+          .eq('tenant_id', tenantId)
+          .eq('app_key', DOCUMENTS_APP_KEY)
+          .maybeSingle());
+      }
+    }
     if (data && data.status === 'active' && isRecord(data.service_config)) {
       const cfg = data.service_config as Record<string, unknown>;
       const enc = typeof cfg.mibServiceTokenEnc === 'string' ? cfg.mibServiceTokenEnc : '';

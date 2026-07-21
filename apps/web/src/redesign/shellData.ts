@@ -14,11 +14,14 @@ export interface NavItem { key: SectionKey; label: string; glyph: string; count?
 export const PRIMARY_NAV: NavItem[] = [
   { key: 'chat', label: 'Chat', glyph: 'C' },
   { key: 'stores', label: 'Stores', glyph: 'St' },
-  // Marketplace/Connectors/Plugins items removed: they had no real panes —
-  // each rendered a placeholder empty state on fully-connected workspaces
-  // and split the Apps/Stores taxonomy (validation sweep + UX review). Apps
-  // is the marketplace surface; Stores is the connectors surface.
+  // Marketplace/Connectors/Plugins were removed by the 07-20 validation sweep
+  // because they had no real panes; they're back by founder direction now that
+  // each renders a real page (MarketplacePage / ConnectorsPage / PluginsPage).
+  // Marketplace = discover/install; Apps = active apps A→Z.
+  { key: 'marketplace', label: 'Marketplace', glyph: 'Mk' },
   { key: 'apps', label: 'Apps', glyph: 'Ap' },
+  { key: 'connectors', label: 'Connectors', glyph: 'Co' },
+  { key: 'plugins', label: 'Plugins', glyph: 'Pl' },
   { key: 'skills', label: 'Skills', glyph: 'Sk', count: 5 },
   { key: 'agents', label: 'Agents', glyph: 'Ag', count: 5 },
   { key: 'models', label: 'Models', glyph: 'M' },
@@ -27,9 +30,15 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'health', label: 'Connection Health', glyph: 'H' },
 ];
 
+// In-shell marketplace apps: rendered inside the shell when the workspace has
+// an active entitlement (installed from Marketplace), surfaced as dynamic nav
+// entries — not part of the fixed workspace nav.
+export const EMBEDDED_APP_NAV: Record<'documents' | 'edi-invoices', NavItem> = {
+  documents: { key: 'documents', label: 'Documents', glyph: 'Dc' },
+  'edi-invoices': { key: 'edi-invoices', label: 'EDI Invoices', glyph: 'ED' },
+};
+
 export const WORKSPACE_NAV: NavItem[] = [
-  { key: 'documents', label: 'Documents', glyph: 'Dc' },
-  { key: 'edi-invoices', label: 'EDI Invoices', glyph: 'ED' },
   { key: 'team', label: 'Team', glyph: 'Tm' },
   { key: 'billing', label: 'Billing', glyph: 'Bi' },
   { key: 'usage', label: 'Usage', glyph: 'Us' },
