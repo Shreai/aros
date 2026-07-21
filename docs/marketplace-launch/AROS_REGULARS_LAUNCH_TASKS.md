@@ -48,6 +48,7 @@ Status date: 2026-07-21
 - [ ] Confirm MCP protected resource metadata at `https://mcp.shre.ai/.well-known/oauth-protected-resource`.
 - [ ] Register ChatGPT OAuth client after OpenAI provides the exact callback URI.
 - [ ] Register Claude OAuth client after Claude provides the exact callback URI.
+- [x] Document OAuth registration values and callback blockers.
 - [ ] Store any client secrets only in shre-secrets vault.
 - [ ] Run production token verification with `AROS_MCP_VERIFY_TOKEN`.
 - [ ] Set `AROS_MCP_DEMO_MODE=false` only after real marketplace token verification passes.
