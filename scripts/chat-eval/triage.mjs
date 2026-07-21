@@ -19,7 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const DRY = args.includes('--dry-run');
 const runArg = args[args.indexOf('--run') + 1];
-const REPO = process.env.CHAT_EVAL_REPO ?? 'Shreai/aros';
+const REPO = process.env.CHAT_EVAL_REPO ?? 'Nirlabinc/aros';
 const TOKEN = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
 const LABEL = 'chat-eval';
 
