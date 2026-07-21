@@ -1787,11 +1787,16 @@ async function handleAppLaunchCreate(req: IncomingMessage, res: ServerResponse, 
   // site-scoped members get NOTHING — fail closed).
   let storeIds = tenantStoreIds;
   if (bundleDataScope(auth.bundle) !== 'all' && tenantStoreIds.length) {
-    const [{ count: tenantAssignmentCount }, { data: memberRows }] = await Promise.all([
+    const [countRes, { data: memberRows }] = await Promise.all([
       supabase.from('tenant_member_stores').select('connector_id', { count: 'exact', head: true }).eq('tenant_id', auth.tenantId),
       supabase.from('tenant_member_stores').select('connector_id').eq('tenant_id', auth.tenantId).eq('user_id', auth.userId),
     ]);
-    storeIds = filterStoresForBundle(auth.bundle, tenantStoreIds, (memberRows || []).map(r => String(r.connector_id)), (tenantAssignmentCount ?? 0) > 0);
+    // Fail closed: if the adoption-count query errors we do NOT know whether
+    // the tenant has adopted site-scoping — assume adopted so a DB blip can
+    // never hand a site-scoped member the full tenant store set. (memberRows
+    // failing already fails closed → empty assignment → no stores.)
+    const tenantHasAssignments = countRes.error ? true : (countRes.count ?? 0) > 0;
+    storeIds = filterStoresForBundle(auth.bundle, tenantStoreIds, (memberRows || []).map(r => String(r.connector_id)), tenantHasAssignments);
   }
   appLaunchGrants.set(hashAppLaunchCode(code), { appKey, tenantId: auth.tenantId, userId: auth.userId, role: auth.role, bundle: auth.bundle, storeIds, expiresAt: Date.now() + APP_LAUNCH_TTL_MS });
   for (const [key, grant] of appLaunchGrants) if (grant.expiresAt <= Date.now()) appLaunchGrants.delete(key);
