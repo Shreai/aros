@@ -25,6 +25,60 @@ import { validateAddMemberInput, INVITEE_NOT_REGISTERED } from './workspace-memb
 import { parsePlatformAdmins, isPlatformAdmin } from './platform-admin.js';
 import { NOTIFICATION_CATALOG, NOTIFICATION_CHANNELS, mergePreferences, validatePreferenceUpdate, isEnabled, type PreferenceRow } from './notifications.js';
 import { sendEmail, emailConfigured } from './email.js';
+import { formatWeeklyBrief, type DigestBody } from './digest-email.js';
+
+/**
+ * Weekly Brief delivery — sends each connected workspace its owner digest by
+ * email, gated per user by notification preferences (event 'weekly-brief').
+ * Idempotent per digest period: an audit_log row (digest.brief_sent,
+ * resource=period_end) is the dedupe record, so restarts and the 12h check
+ * cadence never double-send. Opt out platform-wide with WEEKLY_BRIEF_EMAILS=0.
+ */
+async function runWeeklyBriefDelivery(): Promise<void> {
+  if (!emailConfigured() || process.env.WEEKLY_BRIEF_EMAILS === '0') return;
+  try {
+    const supabase = createSupabaseAdmin();
+    const { data: connectors } = await supabase
+      .from('tenant_connectors')
+      .select('tenant_id,name')
+      .eq('status', 'connected')
+      .eq('type', 'rapidrms-api');
+    const tenants = new Map<string, string>();
+    for (const c of connectors || []) if (!tenants.has(c.tenant_id)) tenants.set(c.tenant_id, c.name);
+
+    for (const [tenantId, storeName] of tenants) {
+      try {
+        const scope = await resolveDigestScope(tenantId);
+        if (!scope) continue;
+        const upstream = await fetch(
+          `${SHRE_RAPIDRMS_URL}/api/digest/latest?provider=${encodeURIComponent(scope.provider)}&store_id=${encodeURIComponent(scope.storeId)}`,
+          { signal: AbortSignal.timeout(10_000), headers: digestHeaders() },
+        );
+        if (!upstream.ok) continue;
+        const brief = formatWeeklyBrief(storeName, (await upstream.json()) as DigestBody);
+        if (!brief) continue;
+        // Skip stale periods (upstream not regenerating) and already-sent ones.
+        if (Date.now() - Date.parse(`${brief.periodEnd}T00:00:00Z`) > 8 * 86_400_000) continue;
+        const { data: already } = await supabase
+          .from('audit_log')
+          .select('id')
+          .eq('tenant_id', tenantId)
+          .eq('action', 'digest.brief_sent')
+          .eq('resource', brief.periodEnd)
+          .limit(1)
+          .maybeSingle();
+        if (already) continue;
+        await notifyWorkspace(tenantId, 'weekly-brief', brief.subject, brief.text);
+        await auditLog({ tenantId, action: 'digest.brief_sent', resource: brief.periodEnd, detail: { store: storeName }, ip: 'scheduler' });
+        console.log(`[weekly-brief] sent for tenant ${tenantId} period ${brief.periodEnd}`);
+      } catch (err) {
+        console.error('[weekly-brief] tenant delivery failed:', err instanceof Error ? err.message : err);
+      }
+    }
+  } catch (err) {
+    console.error('[weekly-brief]', err instanceof Error ? err.message : err);
+  }
+}
 
 /**
  * Best-effort workspace notification: email every ACTIVE member whose
@@ -4949,6 +5003,14 @@ server.listen(PORT, '0.0.0.0', () => {
     setInterval(run, snapshotMin * 60_000).unref();
     setTimeout(run, 60_000).unref(); // first run once deps settle
     console.log(`[aros-platform] store snapshotter enabled (every ${snapshotMin}m)`);
+  }
+
+  // Weekly Brief emails — check twice a day; the per-period audit dedupe
+  // makes the cadence idempotent (a new digest period sends exactly once).
+  if (emailConfigured() && process.env.WEEKLY_BRIEF_EMAILS !== '0') {
+    setInterval(() => void runWeeklyBriefDelivery(), 12 * 3600_000).unref();
+    setTimeout(() => void runWeeklyBriefDelivery(), 90_000).unref();
+    console.log('[aros-platform] weekly-brief email delivery enabled');
   }
 });
 
