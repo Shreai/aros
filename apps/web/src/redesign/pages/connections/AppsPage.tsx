@@ -3,7 +3,7 @@ import { useAuth } from '../../../contexts/AuthContext';
 import { createAppLaunch, disableApp, grantApp, listApps, listStores, type AppGrant, type PlatformApp, type StoreConnector } from './api';
 import { activeApps } from './appsLogic';
 
-export function AppsPage({ onBrowse }: { onBrowse?: () => void } = {}) {
+export function AppsPage({ onBrowse, onChange }: { onBrowse?: () => void; onChange?: () => void } = {}) {
   const { session, tenant } = useAuth();
   const auth = useMemo(() => ({ accessToken: session?.access_token, tenantId: tenant?.id }), [session?.access_token, tenant?.id]);
   const [apps, setApps] = useState<PlatformApp[]>([]);
@@ -13,6 +13,7 @@ export function AppsPage({ onBrowse }: { onBrowse?: () => void } = {}) {
   const [busy, setBusy] = useState('');
   const [query, setQuery] = useState('');
   const [setupApp, setSetupApp] = useState<PlatformApp | null>(null);
+  const [confirmId, setConfirmId] = useState('');
   const [stores, setStores] = useState<StoreConnector[]>([]);
   const [storeIds, setStoreIds] = useState<string[]>([]);
 
@@ -42,7 +43,7 @@ export function AppsPage({ onBrowse }: { onBrowse?: () => void } = {}) {
   async function saveSetup() {
     if (!setupApp) return;
     setBusy(setupApp.id); setError('');
-    try { await grantApp(auth, setupApp, storeIds); setSetupApp(null); await load(); }
+    try { await grantApp(auth, setupApp, storeIds); setSetupApp(null); await load(); onChange?.(); }
     catch (e) { setError(e instanceof Error ? e.message : 'App activation failed'); }
     finally { setBusy(''); }
   }
@@ -51,13 +52,16 @@ export function AppsPage({ onBrowse }: { onBrowse?: () => void } = {}) {
     if (!active.has(app.id)) {
       if (app.id === 'storepulse') return beginSetup(app);
       setBusy(app.id); setError('');
-      try { await grantApp(auth, app); await load(); }
+      try { await grantApp(auth, app); await load(); onChange?.(); }
       catch (e) { setError(e instanceof Error ? e.message : 'App update failed'); }
       finally { setBusy(''); }
       return;
     }
-    setBusy(app.id); setError('');
-    try { await disableApp(auth, app.id); await load(); }
+    // Disabling is workspace-wide (removes the app for every member and gates
+    // its pages) — require an explicit second click on the same button.
+    if (confirmId !== app.id) { setConfirmId(app.id); return; }
+    setConfirmId(''); setBusy(app.id); setError('');
+    try { await disableApp(auth, app.id); await load(); onChange?.(); }
     catch (e) { setError(e instanceof Error ? e.message : 'App update failed'); }
     finally { setBusy(''); }
   }
@@ -78,7 +82,7 @@ export function AppsPage({ onBrowse }: { onBrowse?: () => void } = {}) {
       {visible.length === 0 ? <div className="rsx2-empty"><div className="rsx2-empty__title">No matching apps</div><div className="rsx2-empty__text">Try another name or keyword.</div></div> : <div className="rsx-cards">{visible.map(app => {
         const enabled = active.has(app.id); const unavailable = app.status !== 'active';
         const mapped = grants.find(item => item.app_key === app.id)?.service_config?.storeIds?.length || 0;
-        return <article className="rsx-card" key={app.id}><div className="rsx-card__top"><div className="rsx-card__icon">{app.icon || app.name.slice(0, 2).toUpperCase()}</div><div className="rsx-card__title">{app.name}</div></div><div className="rsx-card__desc">{app.description || 'No description provided by the app catalog.'}</div><div className="rsx-card__desc">{enabled && app.id === 'storepulse' ? (mapped ? `${mapped} connected store${mapped === 1 ? '' : 's'} mapped · Ready for store intelligence` : 'Active · Connect a store to begin syncing data') : (app.required_scopes || []).length ? `Access: ${(app.required_scopes || []).join(', ')}` : 'No additional scopes requested.'}</div><div className="rsx-card__foot"><span className={`rsx-badge rsx-badge--${enabled ? 'on' : unavailable ? 'warn' : 'off'}`}>{enabled ? 'Active' : unavailable ? 'Setup required' : 'Available'}</span>{enabled && app.url && <button className="rsx-card__btn" disabled={Boolean(busy)} onClick={() => void openApp(app)}>{busy === `open:${app.id}` ? 'Opening…' : 'Open'}</button>}{enabled && app.id === 'storepulse' && <button className="rsx-card__btn" disabled={Boolean(busy)} onClick={() => void beginSetup(app)}>Manage</button>}<button className="rsx-card__btn" disabled={Boolean(busy) || unavailable} onClick={() => void toggle(app)}>{busy === app.id ? 'Updating…' : enabled ? 'Disable' : unavailable ? 'Not ready' : 'Enable'}</button></div></article>;
+        return <article className="rsx-card" key={app.id}><div className="rsx-card__top"><div className="rsx-card__icon">{app.icon || app.name.slice(0, 2).toUpperCase()}</div><div className="rsx-card__title">{app.name}</div></div><div className="rsx-card__desc">{app.description || 'No description provided by the app catalog.'}</div><div className="rsx-card__desc">{enabled && app.id === 'storepulse' ? (mapped ? `${mapped} connected store${mapped === 1 ? '' : 's'} mapped · Ready for store intelligence` : 'Active · Connect a store to begin syncing data') : (app.required_scopes || []).length ? `Access: ${(app.required_scopes || []).join(', ')}` : 'No additional scopes requested.'}</div><div className="rsx-card__foot"><span className={`rsx-badge rsx-badge--${enabled ? 'on' : unavailable ? 'warn' : 'off'}`}>{enabled ? 'Active' : unavailable ? 'Setup required' : 'Available'}</span>{enabled && app.url && <button className="rsx-card__btn" disabled={Boolean(busy)} onClick={() => void openApp(app)}>{busy === `open:${app.id}` ? 'Opening…' : 'Open'}</button>}{enabled && app.id === 'storepulse' && <button className="rsx-card__btn" disabled={Boolean(busy)} onClick={() => void beginSetup(app)}>Manage</button>}<button className="rsx-card__btn" disabled={Boolean(busy) || unavailable} onClick={() => void toggle(app)} onBlur={() => confirmId === app.id && setConfirmId('')}>{busy === app.id ? 'Updating…' : enabled ? (confirmId === app.id ? 'Confirm disable?' : 'Disable') : unavailable ? 'Not ready' : 'Enable'}</button></div></article>;
       })}</div>}
     </>}
     {setupApp && <div className="setup-modal-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSetupApp(null); }}><div className="setup-modal" role="dialog" aria-modal="true" aria-label="Set up StorePulse"><div className="modal-title"><div><p className="setup-eyebrow">StorePulse setup</p><h2>Choose data access</h2></div><button className="modal-close" type="button" onClick={() => setSetupApp(null)} aria-label="Close">×</button></div><div className="connection-form"><div className="rsx-note"><div className="rsx-note__title">Requested capabilities</div><div className="rsx-note__body">Read stores and POS data for dashboards, health monitoring, and approved agent questions. StorePulse does not receive write access.</div></div>{stores.length ? <fieldset><legend>Connected stores</legend>{stores.map(store => <label key={store.id}><input type="checkbox" checked={storeIds.includes(store.id)} onChange={event => setStoreIds(current => event.target.checked ? [...current, store.id] : current.filter(id => id !== store.id))} /> {store.name}</label>)}</fieldset> : <div className="rsx-note"><div className="rsx-note__title">No healthy stores found</div><div className="rsx-note__body">You can activate StorePulse now, then connect a POS from Stores before live data can sync.</div></div>}<div className="test-success"><strong>What happens next</strong><span>AROS registers StorePulse for this workspace, exposes it in Connection Health, and unlocks its Open action. Live insights begin when at least one healthy store is mapped.</span></div></div><div className="modal-actions"><button className="setup-secondary" type="button" onClick={() => setSetupApp(null)}>Cancel</button><button className="setup-primary" type="button" disabled={Boolean(busy)} onClick={() => void saveSetup()}>{busy ? 'Activating…' : active.has(setupApp.id) ? 'Save store access' : 'Activate StorePulse'}</button></div></div></div>}

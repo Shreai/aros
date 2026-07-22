@@ -94,11 +94,16 @@ export function AppShell() {
   // EDI Invoices) are routable and appear in the workspace nav. null = loading.
   // Demo/preview treats every embedded app as installed.
   const [installedApps, setInstalledApps] = useState<Set<string> | null>(demo ? new Set(Object.keys(EMBEDDED_APP_NAV)) : null);
+  // A failed entitlements fetch is NOT "nothing installed" — collapsing the two
+  // would render an installed app as uninstalled (a lie) and strip it from the
+  // nav. Track the error separately so the gate can offer an honest retry.
+  const [installedAppsError, setInstalledAppsError] = useState(false);
   const refreshInstalledApps = () => {
     if (demo) { setInstalledApps(new Set(Object.keys(EMBEDDED_APP_NAV))); return; }
+    setInstalledAppsError(false);
     listMarketplaceEntitlements({ accessToken: session?.access_token, tenantId: tenant?.id })
-      .then(grants => setInstalledApps(new Set(grants.filter(g => g.status === 'active').map(g => g.app_key))))
-      .catch(() => setInstalledApps(new Set()));
+      .then(grants => { setInstalledApps(new Set(grants.filter(g => g.status === 'active').map(g => g.app_key))); })
+      .catch(() => { setInstalledAppsError(true); });
   };
   useEffect(() => {
     refreshInstalledApps();
@@ -173,6 +178,9 @@ export function AppShell() {
     // In-shell marketplace apps gate on an active entitlement: not installed →
     // an install prompt pointing at Marketplace, never a broken page.
     if (section === 'documents' || section === 'edi-invoices') {
+      if (installedAppsError && installedApps === null) {
+        return <div className="rsx-panel"><div className="rsx-note" role="alert"><div className="rsx-note__title">Couldn’t check your apps</div><div className="rsx-note__body">We couldn’t load which apps are active for this workspace. This is on our end — your apps aren’t affected.</div><button className="rsx-row__btn" onClick={() => refreshInstalledApps()}>Try again</button></div></div>;
+      }
       if (installedApps === null) return <div className="rsx-panel"><div className="rsx2-empty"><div className="rsx2-empty__title">Loading…</div></div></div>;
       if (!installedApps.has(section)) {
         return <AppInstallPrompt name={EMBEDDED_APP_NAV[section].label} onBrowse={() => goSection('marketplace')} />;
@@ -185,7 +193,7 @@ export function AppShell() {
     if (section === 'connectors') return <ConnectorsPage onBrowse={() => goSection('marketplace')} />;
     if (section === 'plugins') return <PluginsPage onBrowse={() => goSection('marketplace')} />;
     if (section === 'stores') return <StoresPage onConnect={openWizard} />;
-    if (section === 'apps') return <AppsPage onBrowse={() => goSection('marketplace')} />;
+    if (section === 'apps') return <AppsPage onBrowse={() => goSection('marketplace')} onChange={refreshInstalledApps} />;
     if (section === 'permissions') return <PermissionsPage />;
     if (section === 'health') return <ConnectionHealthPage />;
     if (section === 'devices') return <DevicesPage />;
