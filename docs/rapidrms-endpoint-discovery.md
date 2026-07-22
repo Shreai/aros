@@ -1,0 +1,53 @@
+# RapidRMS Endpoint Discovery Matrix
+
+This matrix tracks which AROS agent skillsets have verified RapidRMS HTTP API contracts. Back-office page routes are not automatically API routes; every answer tool must be verified before it claims numbers.
+
+## Verified direct API
+
+| Agent | Skill family | RapidRMS source | Status |
+| --- | --- | --- | --- |
+| Marco | Sales summary, invoice report | `GET /api/InvoiceReport` with full-day datetime bounds | Verified live |
+| Ana | Item catalog, recently added/edited item candidates, low stock | `GET /api/Item` | Verified live |
+| Ana | Top sold items | Invoice report fallback works; `POST /api/SalesDetail/Get` returned 404 in live probe | Partially verified |
+| Victor | Void exceptions | `GET /api/InvoiceReport` `isVoid` flag | Verified live |
+
+## Cataloged, needs endpoint mapping
+
+| Agent | Skill family | Back-office page / candidate | Latest probe result |
+| --- | --- | --- | --- |
+| Larry | Time stamp report, employee hours, payroll period summary | `/TimeStamp`; candidates `/api/TimeStamp`, `/api/TimeStamp/Get`, `/api/TimeStamp/Employee` | Needs live mapping |
+| Larry | Time stamp edit/add/void | `/TimeStamp` write controls | Must be approval-gated; no API contract verified |
+| Larry | Payroll reminder schedule | AROS scheduled job + notification lane | Needs job contract |
+| Marco | Tender reports | `/TenderReport`; candidate `/api/TenderReport` | 404 in live probe |
+| Marco | Hourly sales | `/HourlyReport`; candidate `/api/HourlyReport` | 404 in live probe |
+| Nora add-on | Tax breakdown | `/ReportItemSold/...`, `/Tax`; candidate `/api/ReportItemSold/Tax` | 404 in live probe |
+| Felix add-on | Fuel breakdown | `/FuelReport`, `/FuelDetailsReport`, Verifone fuel reports | 404 in live probe |
+| Priya add-on | Promotion performance | `/Discount/SalesByPromotion`, `/Promotion` | candidate returned 400/404 in live probe |
+| Tessa | Gift card activity/liability | `/GiftCardInventory`; candidate `/api/GiftCardInventory` | 404 in live probe |
+| Victor | Payout/drop review | `/DropAmountReport`; candidate `/api/DropAmountReport` | 404 in live probe |
+| Owen add-on | Department/vendor/report comparisons | `/ReportItemSold/...` and analytics views | Direct API routes need mapping; CortexDB skill connector has SQL-style methods |
+
+## Mutation safety rule
+
+Time-clock edits, additions, and voids are payroll-impacting staff/security writes. The production workflow must be:
+
+1. Read current store, employee, and exact time range.
+2. Produce a correction draft with before/after values and reason.
+3. Require owner/admin confirmation immediately before the write.
+4. Execute only on an allowlisted store/connector.
+5. Read back the changed time stamp.
+6. Audit without credentials or unnecessary employee PII.
+
+## Probe script
+
+Run from a deployed environment with normal AROS secrets loaded:
+
+```bash
+pnpm exec tsx scripts/rapidrms-report-endpoint-probe.ts
+```
+
+Optional environment:
+
+- `RAPIDRMS_PROBE_DATE=YYYY-MM-DD`
+- `RAPIDRMS_PROBE_CONNECTOR_ID=<connector uuid>`
+- `RAPIDRMS_PROBE_INCLUDE_TENANT=1`

@@ -32,8 +32,18 @@ describe('StorePulse agent skillsets', () => {
       'Department Comparison',
       'Vendor Comparison',
       'Store and Date Comparison',
+      'Time Stamp Report',
+      'Employee Hours Report',
+      'Payroll Period Summary',
+      'Payroll Reminder Schedule',
+      'Time Stamp Correction Drafts',
+      'Approval-Gated Time Stamp Edit',
+      'Approval-Gated Time Stamp Add',
+      'Approval-Gated Time Stamp Void',
     ]) {
       expect(serverSource).toContain(`'${skill}'`);
     }
+    expect(serverSource).toContain("'human.approval.required'");
+    expect(serverSource).toContain("'audit.required'");
   });
 });
