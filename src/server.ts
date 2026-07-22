@@ -545,6 +545,9 @@ async function proxyRequest(req: IncomingMessage, res: ServerResponse, baseUrl: 
   headers.set('X-Brand', 'aros');
   headers.set('X-Forwarded-Host', String(req.headers.host || 'app.aros.live'));
   headers.delete('accept-encoding');
+  headers.delete('content-length');
+  headers.delete('transfer-encoding');
+  headers.delete('connection');
 
   if (current.pathname.startsWith('/sx-tasks/')) {
     const token = readTaskToken();
