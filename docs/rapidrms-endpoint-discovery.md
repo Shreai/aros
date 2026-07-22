@@ -51,3 +51,27 @@ Optional environment:
 - `RAPIDRMS_PROBE_DATE=YYYY-MM-DD`
 - `RAPIDRMS_PROBE_CONNECTOR_ID=<connector uuid>`
 - `RAPIDRMS_PROBE_INCLUDE_TENANT=1`
+
+For broader endpoint discovery when a back-office page route does not map to a
+direct API route, use the read-only sweep:
+
+```bash
+RAPIDRMS_DISCOVERY_FAMILY=timeclock pnpm exec tsx scripts/rapidrms-read-endpoint-discovery.ts
+RAPIDRMS_DISCOVERY_FAMILY=reports pnpm exec tsx scripts/rapidrms-read-endpoint-discovery.ts
+```
+
+Optional environment:
+
+- `RAPIDRMS_DISCOVERY_DATE=YYYY-MM-DD`
+- `RAPIDRMS_DISCOVERY_CONNECTOR_ID=<connector uuid>`
+- `RAPIDRMS_DISCOVERY_LIMIT=300`
+- `RAPIDRMS_DISCOVERY_INCLUDE_TENANT=1`
+
+The sweep only attempts GET and clearly read-shaped POST routes such as `Get`,
+`List`, `Report`, and `Search`. It intentionally excludes mutation verbs
+including Add, Save, Update, Edit, Delete, Void, ClockIn, and ClockOut.
+
+Discovery output is not a production contract by itself. Promote a route only
+after a focused fixture/test pins the method, path, required parameters,
+envelope shape, row keys, date-boundary behavior, empty-state behavior, and any
+application-level error flag.
