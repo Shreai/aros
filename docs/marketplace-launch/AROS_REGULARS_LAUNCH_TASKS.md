@@ -12,6 +12,7 @@ Status date: 2026-07-22
 | Legal/compliance | Privacy, terms, security, data access wording | Engineering, demo data | Pending counsel signoff |
 | Marketplace packet | Submission JSON, screenshots, prompts, reviewer instructions | Engineering after beta URL is stable | Packet complete; screenshots blocked by portals |
 | Review submission | Submit to OpenAI and Claude portals | None after all gates are green | Blocked until all gates pass |
+| CI/deploy | GitHub Actions deploy workflow scheduling and staging smoke | Engineering | Fixed; staging deploy passes |
 | Phase 2 white-label | RapidRMS/private-label listings and tenant branding | Starts after Phase 1 submission | Deferred |
 
 ## Gate 1 - Beta MCP Deploy
@@ -143,6 +144,41 @@ Status date: 2026-07-22
 - GitHub deploy workflow runs `29859156916` and `29860502448` remain queued.
   Production is already manually deployed and healthy; this remains a CI/org
   scheduling gate, not a current MCP readiness blocker.
+
+2026-07-22 blocker closeout:
+
+- Fixed GitHub Actions scheduling:
+  - Repository Actions were disabled (`enabled: false`); enabled Actions with
+    `allowed_actions: all`.
+  - New PR checks now run and pass.
+  - The old queued deploy runs `29859156916` and `29860502448` still return
+    GitHub API 500 on cancel; treat them as stale pre-enable artifacts.
+- Fixed staging deploy workflow:
+  - PR `https://github.com/Nirlabinc/aros/pull/158` merged at
+    `993fcaa2ef4ecf4ee05f8fb976cd9c58ca3a6bb5`.
+  - Staging deploy run `https://github.com/Nirlabinc/aros/actions/runs/29889050598`
+    completed successfully.
+  - `https://beta.aros.live` and `https://dev.aros.live` returned HTTP 200
+    after deploy.
+- Reconfirmed live marketplace readiness:
+  - MCP health, OAuth protected-resource metadata, OAuth authorization-server
+    metadata, operator MCP metadata, and Regulars MCP metadata return HTTP 200.
+  - `POST https://mcp.shre.ai/regulars` lists 5 tools; all advertise
+    `readOnlyHint: true`, `destructiveHint: false`, and
+    `securitySchemes: [{ type: "noauth" }]`.
+  - `https://www.aros.live/legal/privacy/` and
+    `https://www.aros.live/legal/terms/` return HTTP 200.
+  - Apex `https://aros.live/legal/...` still returns 404, but marketplace
+    packet URLs intentionally use the verified `www.aros.live` legal URLs.
+- Reconfirmed current external gates:
+  - OpenAI Platform portal remains at login
+    `https://platform.openai.com/login?next=%2Fplugins`; ChatGPT OAuth callback
+    cannot be known until a signed-in org account with app/plugin management
+    access opens the app management page.
+  - Claude directory submission still requires a Claude Team/Enterprise org
+    settings account for `info@rapidinfosoft.com`.
+  - Real marketplace-token verification remains pending until ChatGPT or Claude
+    mints a token.
 
 ## Gate 6 - Submit
 

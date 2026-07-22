@@ -17,6 +17,10 @@ Status date: 2026-07-22
 - Production health reports `demoMode: false`.
 - Unauthenticated operator calls return HTTP 401 with a bearer challenge, as
   expected for the protected AROS operator surface.
+- GitHub Actions scheduling is fixed; staging deploy from `main` passes.
+- Use the verified `www.aros.live` legal URLs below. Apex
+  `aros.live/legal/...` is not part of the marketplace packet and currently
+  returns 404.
 
 ## ChatGPT Portal
 
@@ -32,8 +36,10 @@ Status date: 2026-07-22
 - [ ] Submit after legal approval.
 
 Current blocker: Chrome is open at
-`https://platform.openai.com/login?next=%2Fplugins`. Sign in with an OpenAI
-Platform organization account that can manage apps/plugins, then copy the exact
+`https://platform.openai.com/login?next=%2Fplugins`. Official OpenAI submission
+requirements still require an OpenAI Platform org with app/plugin management
+access. Sign in with an account that has `api.apps.write`, create/open the
+AROS app draft, scan `https://mcp.shre.ai/aros/operator`, then copy the exact
 ChatGPT callback URI from the app management page.
 
 ## Claude Portal
