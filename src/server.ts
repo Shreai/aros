@@ -17,6 +17,7 @@ import {
   type PlanId,
 } from './billing/stripe.js';
 import { handleStripeWebhook } from './billing/webhook.js';
+import { publicServiceConfig } from './marketplace/service-config.js';
 import { provisionLicense } from './billing/license.js';
 import { listTasks } from '../tasks/store.js';
 import { createSupabaseAdmin, createSupabaseAuthClient } from './supabase.js';
@@ -2010,12 +2011,15 @@ async function handleMarketplaceEntitlements(req: IncomingMessage, res: ServerRe
     const supabase = createSupabaseAdmin();
     const { data, error } = await supabase
       .from('marketplace_app_entitlements')
-      .select('id, tenant_id, app_key, status, source, enabled_by, enabled_at, disabled_at, role_mapping, service_config, metadata, created_at, updated_at')
+      .select('id, tenant_id, app_key, status, source, enabled_by, enabled_at, disabled_at, service_config, created_at, updated_at')
       .eq('tenant_id', auth.tenantId)
       .order('app_key', { ascending: true });
 
     if (error) throw error;
-    json(res, 200, { entitlements: data || [] });
+    // Strip provisioning secrets from service_config; drop role_mapping +
+    // metadata entirely (client reads neither).
+    const safe = (data || []).map(row => ({ ...row, service_config: publicServiceConfig(row.service_config) }));
+    json(res, 200, { entitlements: safe });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to list marketplace entitlements';
     console.error('[marketplace.entitlements]', message);
@@ -2249,7 +2253,7 @@ async function handlePlatformApps(req: IncomingMessage, res: ServerResponse, app
     // plus effective_skills: what THIS caller's role bundle actually gets
     // (tenant role_mapping override > preset rule > no bundle = none).
     const roleMappingByApp = new Map((grants || []).map(g => [g.app_key, (g as { role_mapping?: Record<string, { skills?: string[] }> | null }).role_mapping ?? null]));
-    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: (apps || []).map(app => { const capability = APP_CAPABILITY_BUNDLES[app.id] || null; return { ...app, bundle: capability, effective_skills: capability ? effectiveAppSkills(auth.bundle, capability.skills.map(s => s.name), roleMappingByApp.get(app.id)) : [] }; }), grants: (grants || []).map(({ role_mapping: _rm, ...rest }) => rest) });
+    return error ? json(res, 500, { error: error.message }) : json(res, 200, { apps: (apps || []).map(app => { const capability = APP_CAPABILITY_BUNDLES[app.id] || null; return { ...app, bundle: capability, effective_skills: capability ? effectiveAppSkills(auth.bundle, capability.skills.map(s => s.name), roleMappingByApp.get(app.id)) : [] }; }), grants: (grants || []).map(({ role_mapping: _rm, service_config, ...rest }) => ({ ...rest, service_config: publicServiceConfig(service_config) })) });
   }
   if (!appId) return json(res, 400, { error: 'app id required' });
   if (!['owner', 'admin'].includes(auth.role)) return json(res, 403, { error: 'Workspace admin access required' });
