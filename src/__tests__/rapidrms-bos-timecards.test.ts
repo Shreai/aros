@@ -39,6 +39,26 @@ describe('RapidRMS BOS timecard adapter', () => {
     });
   });
 
+  it('recognizes the live BOS underscore field names', () => {
+    expect(normalizeBosTimecardRow({
+      UserId: 9,
+      EmployeeName: 'Live Row',
+      DayDate: '7/21/2026',
+      ClockIn: '7/21/2026 8:00 AM',
+      ClockOut: '7/21/2026 4:00 PM',
+      Working_Second: '28800',
+      Working_Hr: '08:00',
+      ClockId: '123',
+      IsVoid: false,
+    })).toMatchObject({
+      employeeId: '9',
+      employeeName: 'Live Row',
+      clockDate: '2026-07-21',
+      totalHours: 8,
+      clockId: '123',
+    });
+  });
+
   it('summarizes hours by employee and excludes voided punch hours', () => {
     const rows = [
       normalizeBosTimecardRow({ EmployeeId: 'e1', EmployeeName: 'Larry', WorkingHours: 8, ClockOut: '2026-07-21T16:00:00' }),

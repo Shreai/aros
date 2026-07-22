@@ -54,11 +54,11 @@ const DEFAULT_TIMEZONE = 'America/New_York';
 const EMPLOYEE_ID_FIELDS = ['employeeId', 'EmployeeId', 'employeeID', 'empId', 'EmpId', 'userId', 'UserId', 'cashierId', 'CashierId', 'id', 'Id'];
 const EMPLOYEE_NAME_FIELDS = ['employeeName', 'EmployeeName', 'empName', 'EmpName', 'userName', 'UserName', 'cashierName', 'CashierName', 'name', 'Name'];
 const CLOCK_ID_FIELDS = ['clockId', 'ClockId', 'timeClockId', 'TimeClockId', 'id', 'Id'];
-const CLOCK_DATE_FIELDS = ['clockDate', 'ClockDate', 'date', 'Date', 'businessDate', 'BusinessDate'];
+const CLOCK_DATE_FIELDS = ['clockDate', 'ClockDate', 'date', 'Date', 'businessDate', 'BusinessDate', 'DayDate'];
 const CLOCK_IN_FIELDS = ['clockIn', 'ClockIn', 'clockInTime', 'ClockInTime', 'clock_in', 'ClockInDateTime', 'clockInDateTime', 'InTime', 'inTime'];
 const CLOCK_OUT_FIELDS = ['clockOut', 'ClockOut', 'clockOutTime', 'ClockOutTime', 'clock_out', 'ClockOutDateTime', 'clockOutDateTime', 'OutTime', 'outTime'];
-const HOURS_FIELDS = ['workingHours', 'WorkingHours', 'workHours', 'WorkHours', 'totalHours', 'TotalHours', 'hours', 'Hours'];
-const SECONDS_FIELDS = ['workingSeconds', 'WorkingSeconds', 'workSeconds', 'WorkSeconds', 'totalSeconds', 'TotalSeconds'];
+const HOURS_FIELDS = ['workingHours', 'WorkingHours', 'Working_Hr', 'working_hr', 'workHours', 'WorkHours', 'totalHours', 'TotalHours', 'hours', 'Hours'];
+const SECONDS_FIELDS = ['workingSeconds', 'WorkingSeconds', 'Working_Second', 'working_second', 'workSeconds', 'WorkSeconds', 'totalSeconds', 'TotalSeconds'];
 const STATUS_FIELDS = ['status', 'Status', 'clockStatus', 'ClockStatus'];
 const VOID_FIELDS = ['isVoid', 'IsVoid', 'void', 'Void', 'isDeleted', 'IsDeleted'];
 
