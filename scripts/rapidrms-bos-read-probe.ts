@@ -133,7 +133,7 @@ async function smokeReadEndpoint(
     bytes: text.length,
     rowCount: rows.length,
     keys: rows[0] ? Object.keys(rows[0]).slice(0, 40) : [],
-    preview: text.replace(/\s+/g, ' ').slice(0, 220),
+    preview: rows.length ? '[redacted rows]' : text.replace(/\s+/g, ' ').slice(0, 220),
   };
 }
 
