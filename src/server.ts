@@ -63,6 +63,19 @@ import {
 import { sendEmail, emailConfigured } from './email.js';
 import { sendSms, smsConfigured } from './sms.js';
 import { formatWeeklyBrief, formatDailySales, formatLowStock, type DigestBody } from './digest-email.js';
+import {
+  renderEmail,
+  renderNotificationEmail,
+  voidAlertContent,
+  voidAlertTestContent,
+  dailySalesContent,
+  lowStockContent,
+  weeklyBriefContent,
+  teamChangeContent,
+  type EmailContent,
+  type TeamChangeAction,
+} from './email-templates.js';
+import { AROS_BRAND } from './email-brand.js';
 
 /**
  * Weekly Brief delivery — sends each connected workspace its owner digest by
@@ -115,9 +128,11 @@ async function runDailyStoreEmails(): Promise<void> {
           if (!already) {
             const daily = await fetchStoreSalesRange(record, vaultSecretFor(tenantId), yesterday, yesterday);
             const sales = daily.find((d) => d.businessDate === yesterday) ?? (daily.length === 0 ? { businessDate: yesterday, revenue: 0, transactions: 0 } : null);
-            const message = formatDailySales(row.name, yesterday, sales ? { revenue: sales.revenue, transactions: sales.transactions } : null);
-            if (message) {
-              await notifyWorkspace(tenantId, 'daily-sales-summary', message.subject, message.text);
+            const figures = sales ? { revenue: sales.revenue, transactions: sales.transactions } : null;
+            const message = formatDailySales(row.name, yesterday, figures);
+            if (message && figures) {
+              await notifyWorkspace(tenantId, 'daily-sales-summary', message.subject, message.text,
+                () => dailySalesContent(row.name, yesterday, figures, AROS_BRAND));
               await auditLog({ tenantId, action: 'notify.daily_sales_sent', resource: yesterday, detail: { store: row.name }, ip: 'scheduler' });
             }
           }
@@ -128,9 +143,11 @@ async function runDailyStoreEmails(): Promise<void> {
           if (!already) {
             const summary = await fetchStoreSummary(record, vaultSecretFor(tenantId));
             if (summary && summary.lowStock.available) {
-              const message = formatLowStock(row.name, summary.lowStock.items);
+              const lowStockItems = summary.lowStock.items;
+              const message = formatLowStock(row.name, lowStockItems);
               if (message) {
-                await notifyWorkspace(tenantId, 'low-stock', message.subject, message.text);
+                await notifyWorkspace(tenantId, 'low-stock', message.subject, message.text,
+                  () => lowStockContent(row.name, lowStockItems, AROS_BRAND));
                 await auditLog({ tenantId, action: 'notify.low_stock_sent', resource: today, detail: { store: row.name, count: summary.lowStock.count }, ip: 'scheduler' });
               }
             }
@@ -237,7 +254,8 @@ async function runWeeklyBriefDelivery(): Promise<void> {
           { signal: AbortSignal.timeout(10_000), headers: digestHeaders() },
         );
         if (!upstream.ok) continue;
-        const brief = formatWeeklyBrief(storeName, (await upstream.json()) as DigestBody);
+        const digestBody = (await upstream.json()) as DigestBody;
+        const brief = formatWeeklyBrief(storeName, digestBody);
         if (!brief) continue;
         // Skip stale periods (upstream not regenerating) and already-sent ones.
         if (Date.now() - Date.parse(`${brief.periodEnd}T00:00:00Z`) > 8 * 86_400_000) continue;
@@ -250,7 +268,8 @@ async function runWeeklyBriefDelivery(): Promise<void> {
           .limit(1)
           .maybeSingle();
         if (already) continue;
-        await notifyWorkspace(tenantId, 'weekly-brief', brief.subject, brief.text);
+        await notifyWorkspace(tenantId, 'weekly-brief', brief.subject, brief.text,
+          () => weeklyBriefContent(storeName, digestBody, AROS_BRAND));
         await auditLog({ tenantId, action: 'digest.brief_sent', resource: brief.periodEnd, detail: { store: storeName }, ip: 'scheduler' });
         console.log(`[weekly-brief] sent for tenant ${tenantId} period ${brief.periodEnd}`);
       } catch (err) {
@@ -537,7 +556,8 @@ async function runTenantVoidSentinel(
     // so this is exactly one physical send per void.
     try {
       const msg = voidAlertMessage(storeLabel, c.invoice);
-      await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
+      await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text,
+        () => voidAlertContent({ storeName: storeLabel, ...c.invoice }, AROS_BRAND));
     } catch (sendErr) {
       // Claimed but delivery threw → AT-MOST-ONCE: mark and move on, never
       // retry. The claim row stays and blocks a refire on the next pass (by
@@ -558,16 +578,59 @@ async function runTenantVoidSentinel(
   }
 }
 
+/** The plain-text body that shipped before HTML templates existed. It stays
+ *  the guaranteed floor: every fallback path below returns exactly this. */
+function legacyEmailBody(text: string): string {
+  return `${text}\n\n${AROS_BRAND.signature}\nManage notifications: ${AROS_BRAND.manageUrl}`;
+}
+
+/**
+ * Pick the branded rendering for this notification, GUARDED. A template that
+ * throws for any reason must never cost a notification, so every failure falls
+ * back to the pre-template plain-text body with no HTML part attached.
+ */
+function renderNotificationBody(
+  event: string,
+  subject: string,
+  text: string,
+  content?: () => EmailContent,
+): { text: string; html?: string } {
+  try {
+    const rendered = content
+      ? renderEmail(content(), AROS_BRAND)
+      : renderNotificationEmail(event, subject, text, AROS_BRAND);
+    if (!rendered.html || !rendered.text) throw new Error('empty render');
+    return rendered;
+  } catch (err) {
+    console.error('[notify] template render failed — sending plain text:', event, err instanceof Error ? err.message : err);
+    return { text: legacyEmailBody(text) };
+  }
+}
+
 /**
  * Best-effort workspace notification: email every ACTIVE member whose
  * preferences enable `event` on the email channel (destination override
  * respected, account email otherwise). Fire-and-forget — never throws, never
  * blocks the caller; a notification lane must not fail an operation.
+ *
+ * `content` is an optional BUILDER (not a built object) so that constructing
+ * the rich version happens inside this function's guard: a throwing template
+ * degrades to plain text instead of failing the caller. Callers holding
+ * structured facts should pass one; everything else is shaped from (subject,
+ * text) by EVENT_PRESENTERS. `text` stays the SMS source — its first line is
+ * what a text message shows, so it must remain a complete sentence.
  */
-async function notifyWorkspace(tenantId: string, event: string, subject: string, text: string): Promise<void> {
+async function notifyWorkspace(
+  tenantId: string,
+  event: string,
+  subject: string,
+  text: string,
+  content?: () => EmailContent,
+): Promise<void> {
   if (!emailConfigured() && !smsConfigured()) return;
   try {
     const supabase = createSupabaseAdmin();
+    const body = renderNotificationBody(event, subject, text, content);
     const [{ data: members }, { data: prefRows }] = await Promise.all([
       supabase.from('tenant_members').select('user_id').eq('tenant_id', tenantId).eq('status', 'active'),
       supabase.from('notification_preferences').select('user_id,event_type,channel,enabled,destination').eq('tenant_id', tenantId),
@@ -583,7 +646,7 @@ async function notifyWorkspace(tenantId: string, event: string, subject: string,
           const { data } = await supabase.auth.admin.getUserById(member.user_id);
           to = data?.user?.email || '';
         }
-        if (to) void sendEmail(to, subject, `${text}\n\n— AROS · app.aros.live\nManage notifications: https://app.aros.live/notifications`);
+        if (to) void sendEmail(to, subject, body.text, body.html, AROS_BRAND.replyTo || undefined);
       }
       // SMS: opt-in only (sms defaults off), requires an explicit destination
       // number, and stays inert until Twilio is configured.
@@ -2942,8 +3005,14 @@ async function handleWorkspaceMemberAdd(
     detail: { email: invitee.email, role: input.role },
     ip: getClientIp(req),
   });
-  void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace',
-    `${invitee.email} was ${invitedByEmail ? 'invited to' : 'added to'} the workspace as ${input.role}.`);
+  const teamSummary = `${invitee.email} was ${invitedByEmail ? 'invited to' : 'added to'} the workspace as ${input.role}.`;
+  void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace', teamSummary,
+    () => teamChangeContent({
+      action: (invitedByEmail ? 'invited' : 'added') as TeamChangeAction,
+      summary: teamSummary,
+      personEmail: invitee.email,
+      role: input.role,
+    }, AROS_BRAND));
   json(res, 201, {
     invited: invitedByEmail,
     id: member.id,
@@ -2979,7 +3048,8 @@ async function handleWorkspaceMembersCompat(req: IncomingMessage, res: ServerRes
       const { data, error } = await supabase.from('tenant_members').update({ role }).eq('tenant_id', workspaceId).eq('id', memberId).select('id,role').single();
       if (error || !data) return json(res, 500, { error: error?.message || 'Role update failed' });
       await auditLog({ tenantId: workspaceId, userId: auth.userId, action: 'workspace.member_role_updated', resource: `member:${memberId}`, detail: { role }, ip: getClientIp(req) });
-      void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace', `A member's role was changed to ${role}.`);
+      void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace', `A member's role was changed to ${role}.`,
+        () => teamChangeContent({ action: 'role_changed', summary: `A member's role was changed to ${role}.`, role }, AROS_BRAND));
       return json(res, 200, { id: data.id, membershipRole: data.role });
     }
     if (req.method === 'DELETE') {
@@ -2987,7 +3057,8 @@ async function handleWorkspaceMembersCompat(req: IncomingMessage, res: ServerRes
       const { error } = await supabase.from('tenant_members').delete().eq('tenant_id', workspaceId).eq('id', memberId);
       if (error) return json(res, 500, { error: error.message });
       await auditLog({ tenantId: workspaceId, userId: auth.userId, action: 'workspace.member_removed', resource: `member:${memberId}`, detail: {}, ip: getClientIp(req) });
-      void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace', 'A member was removed from the workspace.');
+      void notifyWorkspace(workspaceId, 'team-changes', 'Team change in your AROS workspace', 'A member was removed from the workspace.',
+        () => teamChangeContent({ action: 'removed', summary: 'A member was removed from the workspace.' }, AROS_BRAND));
       return json(res, 200, { id: memberId });
     }
     json(res, 405, { error: 'Method not allowed' });
@@ -4213,7 +4284,8 @@ async function handleAutomationManage(
  */
 async function sendAutomationTestFire(req: IncomingMessage, tenantId: string, userId: string, channel: 'email' | 'sms', storeLabel: string): Promise<void> {
   const msg = testFireMessage(storeLabel, channel);
-  await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
+  await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text,
+    () => voidAlertTestContent(storeLabel, channel, AROS_BRAND));
   await auditLog({ tenantId, userId, action: 'automation.rule_test', resource: 'test', detail: { channel }, ip: getClientIp(req) });
 }
 
