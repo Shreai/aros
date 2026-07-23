@@ -995,15 +995,47 @@ async function serveDashboard(req: IncomingMessage, res: ServerResponse): Promis
 
 /** Default JSON body limit for the ~40 small control-plane endpoints. */
 const JSON_BODY_LIMIT = 65_536;
+// ── Chat transport ceiling ─────────────────────────────────────────────────
+// Mirrors apps/web/src/redesign/attach/attachments.ts. Keep the two in step:
+// the client caps a turn's files, this process caps the encoded body, nginx
+// caps the whole request.
+
+/** The real edge ceiling: nginx `client_max_body_size 10m`
+ *  (deploy/hostinger/nginx.conf, shreai/config/nginx-prod.conf). */
+const TRANSPORT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** Client per-turn attachment budget, DECODED (attachments.ts MAX_TURN_BYTES). */
+const CHAT_ATTACHMENT_TURN_BYTES = 7 * 1024 * 1024;
+/** Client per-file cap, DECODED (attachments.ts MAX_FILE_BYTES). */
+const CHAT_ATTACHMENT_FILE_BYTES = 6 * 1024 * 1024;
+/** Room for the JSON envelope: system prompt, transcript, metadata. */
+const CHAT_ENVELOPE_RESERVE_BYTES = 256 * 1024;
+
+/** Encoded size of `decodedBytes` once base64'd into a data URL (4/3 + prefix). */
+function base64WireBytes(decodedBytes: number): number {
+  if (decodedBytes <= 0) return 0;
+  return Math.ceil(decodedBytes / 3) * 4 + 64;
+}
+
 /**
- * Body limit for /v1/chat. Chat turns carry attachments as base64 data URLs, so
- * the ceiling has to clear the client's per-turn cap (7 MB decoded ≈ 9.4 MB
- * encoded — see apps/web/src/redesign/attach/attachments.ts) plus the JSON
- * envelope. The real binding constraint is the nginx `client_max_body_size 10m`
- * in front of this process; this limit sits just above it so a 413 is always
- * the edge's decision, never a surprise from our own parser.
+ * Body limit for /v1/chat — derived from the caps the client actually enforces,
+ * not picked.
+ *
+ * It has to sit BELOW the nginx ceiling, not above it. A limit above the edge's
+ * makes the friendly 413 in `readJsonBody` dead code in production: nginx
+ * answers first with an opaque HTML error page the composer can only report as
+ * a bare status. A conforming turn is at most 7 MB decoded ≈ 9.34 MB base64
+ * plus the envelope (≈ 9.58 MB), so this clears every legal turn while keeping
+ * the over-cap answer OURS, in words the user can act on.
  */
-const CHAT_BODY_LIMIT = 12 * 1024 * 1024;
+const CHAT_BODY_LIMIT = Math.min(
+  base64WireBytes(CHAT_ATTACHMENT_TURN_BYTES) + CHAT_ENVELOPE_RESERVE_BYTES,
+  TRANSPORT_MAX_BODY_BYTES,
+);
+
+/** The over-limit answer quotes the numbers the user's FILES are measured
+ *  against (the client caps), never our internal encoded-body ceiling — the old
+ *  "limit 12 MB" was a number nothing in the system honoured. */
+const CHAT_TOO_LARGE_MESSAGE = `That message is too large to send. Attachments are limited to ${Math.floor(CHAT_ATTACHMENT_FILE_BYTES / (1024 * 1024))} MB per file and ${Math.floor(CHAT_ATTACHMENT_TURN_BYTES / (1024 * 1024))} MB per message. Remove an attachment or send a smaller file.`;
 
 /** Signals an over-limit body so the caller can answer 413 instead of a hang. */
 class BodyTooLargeError extends Error {
@@ -1066,13 +1098,16 @@ type JsonBodyOutcome =
  * the literal string "null" upstream — the user saw a nonsense model reply
  * instead of "that file is too big". This distinguishes the two.
  */
-async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<JsonBodyOutcome> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number, overLimitMessage?: string): Promise<JsonBodyOutcome> {
   let raw: Buffer;
   try {
     raw = await collectBody(req, maxBytes);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
-      return { ok: false, status: 413, error: `That message is too large to send (limit ${Math.floor(maxBytes / (1024 * 1024))} MB including attachments). Remove an attachment or send a smaller file.` };
+      // Callers pass the message that quotes the limit the USER's content is
+      // measured against; `maxBytes` is an encoded-transport number and means
+      // nothing to someone looking at a file size in their picker.
+      return { ok: false, status: 413, error: overLimitMessage || `That request is too large (limit ${Math.floor(maxBytes / (1024 * 1024))} MB).` };
     }
     return { ok: false, status: 400, error: 'The request body could not be read. Please try again.' };
   }
@@ -6783,7 +6818,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
     // Chat bodies carry base64 attachments — read them at the chat limit, and
     // answer a real status when the body is oversized or malformed instead of
     // proxying the literal `null` a failed parse used to produce.
-    const parsed = await readJsonBody(req, CHAT_BODY_LIMIT);
+    const parsed = await readJsonBody(req, CHAT_BODY_LIMIT, CHAT_TOO_LARGE_MESSAGE);
     if (!parsed.ok) {
       res.writeHead(parsed.status, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: parsed.error }));

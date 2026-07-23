@@ -10,6 +10,7 @@ import { AttachSheet } from './attach/AttachSheet';
 import { AttachmentThumbs } from './attach/AttachmentThumbs';
 import { CatalogNotice } from './attach/CatalogNotice';
 import { type Attachment, type AttachError, type CatalogState, attachError, toWire, barcodeLookupQuery, barcodeOutcome } from './attach/attachments';
+import { EXTERNAL_INTELLIGENCE_REQUEST, shouldInterceptTextOnly } from './chatIntent';
 
 /** Warm ChatPalette pulled from the live design tokens so the shared mib-widget
  *  renderer matches the current (light/dark) theme. */
@@ -25,7 +26,6 @@ export function warmPalette(): ChatPalette {
 const ROUTER_URL = (import.meta as any).env?.VITE_ROUTER_URL || '';
 const API_BASE = (window as any).__AROS_API_URL__ || (window.location.hostname === 'localhost' ? 'http://localhost:5457' : '');
 const FLEET_GUIDANCE = `AROS specialist fleet: Ana handles demand, inventory, item movement, fuel demand, hourly margin, item comparisons, and department comparisons; Victor handles shrink, exceptions, payouts, liability, and revenue integrity; Larry handles labor, scheduling, time stamps, employee hours, payroll preparation, approval-gated time-clock corrections, shifts, and customer-account dayparts; Marco handles daily briefings, tender reports, tax breakdowns, hourly sales, report comparisons, store comparisons, and owner reports; Tessa handles supplier intelligence, cost changes, gift cards, promotions, vendor cost watch, and vendor comparisons. External web, news, and weather require a Research & External Intelligence agent with web.search and weather.read capabilities.`;
-const EXTERNAL_INTELLIGENCE_REQUEST = /\b(weather|forecast|temperature|news|headlines|search (?:the )?web|browse (?:the )?(?:web|internet)|look up online)\b/i;
 
 type ActiveAgent = { name: string; capabilities: string[] };
 
@@ -114,7 +114,12 @@ export function ConciergeChat({ onConnect, onConnectApps, seed, focusOnMount, in
       setPending(current => (current.length ? current : atts));
     };
     const hasExternalIntelligence = activeAgents.some(agent => agent.capabilities.some(capability => capability === 'weather.read' || capability === 'web.search'));
-    if (EXTERNAL_INTELLIGENCE_REQUEST.test(q) && !hasExternalIntelligence) {
+    // This interceptor reads the CAPTION only. An attachment turn whose caption
+    // happens to say "news"/"weather" must never be swallowed here: the composer
+    // is already cleared above, and this branch returns without restoring, so
+    // the file would be discarded unrecoverably. Attachments always go to the
+    // router — same rail as the server's hasAttachments() gate in src/server.ts.
+    if (shouldInterceptTextOnly({ matched: EXTERNAL_INTELLIGENCE_REQUEST.test(q), hasAttachments, capabilityActive: hasExternalIntelligence })) {
       const active = activeAgents.length ? activeAgents.map(agent => agent.name).join(', ') : 'no specialists reported';
       setMessages(prev => [...prev, {
         from: 'shre',
