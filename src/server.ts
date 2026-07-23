@@ -565,7 +565,7 @@ async function runTenantVoidSentinel(
  * blocks the caller; a notification lane must not fail an operation.
  */
 async function notifyWorkspace(tenantId: string, event: string, subject: string, text: string): Promise<void> {
-  if (!emailConfigured()) return;
+  if (!emailConfigured() && !smsConfigured()) return;
   try {
     const supabase = createSupabaseAdmin();
     const [{ data: members }, { data: prefRows }] = await Promise.all([
@@ -574,14 +574,17 @@ async function notifyWorkspace(tenantId: string, event: string, subject: string,
     ]);
     for (const member of members || []) {
       const prefs = (prefRows || []).filter((p) => p.user_id === member.user_id) as Array<PreferenceRow & { user_id: string }>;
-      if (!isEnabled(prefs, event, 'email')) continue;
-      const override = prefs.find((p) => p.channel === 'email' && p.destination)?.destination;
-      let to = override || '';
-      if (!to) {
-        const { data } = await supabase.auth.admin.getUserById(member.user_id);
-        to = data?.user?.email || '';
+      // Channels are INDEPENDENTLY gated: a member who opted into SMS only
+      // (email off — the default for opt-in events) must still get the text.
+      if (emailConfigured() && isEnabled(prefs, event, 'email')) {
+        const override = prefs.find((p) => p.channel === 'email' && p.destination)?.destination;
+        let to = override || '';
+        if (!to) {
+          const { data } = await supabase.auth.admin.getUserById(member.user_id);
+          to = data?.user?.email || '';
+        }
+        if (to) void sendEmail(to, subject, `${text}\n\n— AROS · app.aros.live\nManage notifications: https://app.aros.live/notifications`);
       }
-      if (to) void sendEmail(to, subject, `${text}\n\n— AROS · app.aros.live\nManage notifications: https://app.aros.live/notifications`);
       // SMS: opt-in only (sms defaults off), requires an explicit destination
       // number, and stays inert until Twilio is configured.
       if (smsConfigured() && isEnabled(prefs, event, 'sms')) {
