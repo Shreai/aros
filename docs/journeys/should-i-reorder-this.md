@@ -96,8 +96,9 @@ updating. That change is the proof the control is real.
 |---|---|---|
 | Item catalog + on-hand + min level | **VERIFIED live** (`GET /api/Item`, `iteM_InStock`, `iteM_MinStockLevel`) | — |
 | Units sold per item over a range | **VERIFIED** (`collectTopSoldItems()` off `/api/InvoiceReport`; `/api/SalesDetail/Get` 404s) | — |
-| **Per-invoice item lines** (item↔invoice join) | **UNVERIFIED** — `flattenSalesRows()` unnests candidates but no fixture pins the join key | Receipt-count and cross-sell blocks hidden with a stated reason |
-| Cost/margin | **PARTIAL** — cost fields exist, dedicated change timestamps do not (`collectItemChanges` already returns `available:false` rather than guessing — copy that) | Margin block hidden with a reason |
+| **Per-invoice item lines** (item↔invoice join) | ✅ **VERIFIED AVAILABLE** (Cortex probe 2026-07-23): `rapidrms.invoice_line_item` holds **35,780 lines across 20,423 distinct invoices**, with `invoice_no`, `item_code`, `item_qty`, `item_amount`, `item_cost`, `register_id`, `cashier_name`. Receipt counts AND basket co-occurrence are both real | — |
+| Cost/margin | ✅ **AVAILABLE per line** — `item_cost` + `item_amount` on every line; `rapidrms.item` carries `cost`, `cost_price`, `price`. (Dedicated cost-CHANGE timestamps still absent — `collectItemChanges` already returns `available:false` rather than guessing; copy that for change history only) | Change-history block hidden with a reason |
+| Min/max already in the POS | ✅ `rapidrms.item` has **`min_stock_level` AND `max_stock_level`** (plus `qty_on_hand`, `package_type`) | Our recommendation is advice alongside his existing POS values — show both, never silently disagree |
 | **Deal / group membership** | **VIA EDI, read-verified** (`connectors/rapidrms-edi.ts`; writes blocked server-side) | "Turn on EDI Invoices" |
 | Golden product IDs (item survives a SKU/UPC change) | **NOT WIRED** (`STRONG_KEYS.product = ['upc','gtin','sku']` ready) | Keyed on raw item code; history breaks if the code changes — state it or wire it first |
 | `entity_note` + owner-override tables (`item_pace`, `item_stock_override`), RLS from migration 1 | Not built | Controls hidden; only observed numbers shown |
