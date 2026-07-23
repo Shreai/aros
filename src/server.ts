@@ -25,6 +25,7 @@ import {
 import {
   ONBOARDING_GRANT_USD, buildWalletView, shouldAutoRecharge,
   validateTopupUsd, validateAutoRechargeInput, computeBalanceUsd, isFrozen,
+  parsePromoCode, PROMO_MAX_USD,
   type WalletSettings,
 } from './wallet.js';
 import { handleStripeWebhook } from './billing/webhook.js';
@@ -1956,6 +1957,35 @@ async function handleWalletReceipts(req: IncomingMessage, res: ServerResponse): 
   }
 }
 
+/** Redeem a `shrepromo<N>` code for credit. Gated by PROMO_ENABLED (off by
+ * default — these codes are guessable, only for a testing window). Once per
+ * code per workspace; capped at $100 per workspace lifetime. */
+async function handleWalletPromo(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (process.env.PROMO_ENABLED !== '1') return json(res, 404, { error: 'not found' });
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  const body = await parseJsonBody(req);
+  const parsed = parsePromoCode((body as Record<string, unknown> | null)?.code);
+  if ('error' in parsed) return json(res, 400, { error: parsed.error });
+  try {
+    const supabase = createSupabaseAdmin();
+    const { data: prior } = await supabase.from('wallet_ledger').select('amount_usd').eq('tenant_id', auth.tenantId).like('stripe_ref', 'promo:%');
+    const priorTotal = (prior || []).reduce((s, r) => s + Number(r.amount_usd || 0), 0);
+    if (priorTotal + parsed.amountUsd > PROMO_MAX_USD) return json(res, 400, { error: `Promo credit is capped at $${PROMO_MAX_USD} per workspace.` });
+    const ref = `promo:${auth.tenantId}:${parsed.code}`;
+    const { error } = await supabase.from('wallet_ledger').insert({ tenant_id: auth.tenantId, amount_usd: parsed.amountUsd, kind: 'adjustment', stripe_ref: ref, note: `Promo: ${parsed.code}` });
+    if (error) {
+      if ((error as { code?: string }).code === '23505') return json(res, 409, { error: 'You have already used that promo code.' });
+      throw error;
+    }
+    await auditLog({ tenantId: auth.tenantId, userId: auth.userId, action: 'wallet.promo_redeemed', resource: parsed.code, detail: { amountUsd: parsed.amountUsd }, ip: getClientIp(req) });
+    json(res, 200, { ok: true, amountUsd: parsed.amountUsd });
+  } catch (err) {
+    console.error('[wallet.promo]', err instanceof Error ? err.message : err);
+    json(res, 500, { error: 'Could not redeem promo code' });
+  }
+}
+
 async function handleWalletGet(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = await authenticateRequest(req);
   if (!auth) return json(res, 401, { error: 'Authentication required' });
@@ -1963,12 +1993,15 @@ async function handleWalletGet(req: IncomingMessage, res: ServerResponse): Promi
     const [credits, usage, settings] = await Promise.all([
       walletCreditsUsd(auth.tenantId), workspaceUsageUsd(auth.tenantId), walletSettings(auth.tenantId),
     ]);
-    json(res, 200, buildWalletView(credits, usage, {
-      autoRechargeEnabled: settings.autoRechargeEnabled,
-      autoRechargeThresholdUsd: settings.autoRechargeThresholdUsd,
-      autoRechargeAmountUsd: settings.autoRechargeAmountUsd,
-      hasCard: settings.hasCard,
-    }));
+    json(res, 200, {
+      ...buildWalletView(credits, usage, {
+        autoRechargeEnabled: settings.autoRechargeEnabled,
+        autoRechargeThresholdUsd: settings.autoRechargeThresholdUsd,
+        autoRechargeAmountUsd: settings.autoRechargeAmountUsd,
+        hasCard: settings.hasCard,
+      }),
+      promoEnabled: process.env.PROMO_ENABLED === '1',
+    });
   } catch (err) {
     console.error('[wallet.get]', err instanceof Error ? err.message : err);
     json(res, 500, { error: 'Could not load wallet' });
@@ -6954,6 +6987,7 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname === '/api/wallet/setup-card' && method === 'POST') return handleWalletSetupCard(req, res);
   if (pathname === '/api/wallet/auto-recharge' && method === 'POST') return handleWalletAutoRecharge(req, res);
   if (pathname === '/api/wallet/receipts' && method === 'GET') return handleWalletReceipts(req, res);
+  if (pathname === '/api/wallet/promo' && method === 'POST') return handleWalletPromo(req, res);
   if (pathname === '/api/automations' && method === 'GET') {
     return handleAutomationsList(req, res);
   }

@@ -6,6 +6,24 @@
  */
 
 export const ONBOARDING_GRANT_USD = 50;
+/** Promo credits are capped per code AND per workspace lifetime. */
+export const PROMO_MAX_USD = 100;
+
+/**
+ * Parse a promo code of the form `shrepromo<N>` where N is the dollar amount.
+ * Case-insensitive; the grant is capped at PROMO_MAX_USD. Temp/testing codes
+ * — deliberately simple, so they must only be enabled behind PROMO_ENABLED
+ * during a testing window (they are guessable).
+ */
+export function parsePromoCode(raw: unknown): { amountUsd: number; code: string } | { error: string } {
+  if (typeof raw !== 'string') return { error: 'Enter a promo code' };
+  const code = raw.trim().toLowerCase();
+  const m = code.match(/^shrepromo(\d{1,4})$/);
+  if (!m) return { error: 'That promo code is not valid.' };
+  const n = parseInt(m[1], 10);
+  if (n < 1) return { error: 'That promo code is not valid.' };
+  return { amountUsd: Math.min(n, PROMO_MAX_USD), code };
+}
 /** Top-up amounts offered in the UI (dollars). */
 export const TOPUP_PRESETS_USD = [10, 25, 50, 100] as const;
 const MIN_TOPUP_USD = 5;

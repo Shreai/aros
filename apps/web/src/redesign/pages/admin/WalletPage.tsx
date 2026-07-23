@@ -8,6 +8,7 @@ const API_BASE = (window as any).__AROS_API_URL__
 type Wallet = {
   balanceUsd: number; creditsUsd: number; usageUsd: number; frozen: boolean;
   autoRecharge: { autoRechargeEnabled: boolean; autoRechargeThresholdUsd: number; autoRechargeAmountUsd: number; hasCard: boolean };
+  promoEnabled?: boolean;
 };
 const money = (n?: number) => n == null ? '—' : `$${n.toFixed(2)}`;
 const PRESETS = [10, 25, 50, 100];
@@ -25,6 +26,7 @@ export function WalletPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [custom, setCustom] = useState('');
+  const [promo, setPromo] = useState('');
   const [threshold, setThreshold] = useState(10);
   const [amount, setAmount] = useState(25);
   const [note, setNote] = useState('');
@@ -66,6 +68,18 @@ export function WalletPage() {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       window.location.href = data.url; // hosted Stripe checkout
     } catch (e) { setNote(e instanceof Error ? e.message : 'Could not start checkout'); setBusy(''); }
+  }
+
+  async function redeemPromo() {
+    if (!promo.trim()) return;
+    setBusy('promo'); setNote('');
+    try {
+      const res = await fetch(`${API_BASE}/api/wallet/promo`, { method: 'POST', headers, body: JSON.stringify({ code: promo.trim() }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setNote(`Promo applied — $${data.amountUsd} added to your balance.`); setPromo(''); await load();
+    } catch (e) { setNote(e instanceof Error ? e.message : 'Could not redeem promo'); }
+    finally { setBusy(''); }
   }
 
   async function saveAutoRecharge(enabled: boolean) {
@@ -113,6 +127,17 @@ export function WalletPage() {
             </div>
             <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 8 }}>Secure checkout by Stripe. Your card is saved so you can enable auto-recharge.</div>
           </section>
+
+          {/* Promo code — only shown while promos are enabled (testing) */}
+          {wallet.promoEnabled && (
+            <section style={{ border: '1px solid var(--line)', borderRadius: 14, background: 'var(--surface)', padding: 18, boxShadow: 'var(--shadow-card)' }}>
+              <strong style={{ fontSize: 15 }}>Promo code</strong>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                <input type="text" placeholder="e.g. shrepromo50" value={promo} onChange={e => setPromo(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void redeemPromo(); }} style={{ flex: '1 1 200px', minWidth: 180, border: '1px solid var(--line-strong)', background: 'var(--surface)', color: 'var(--ink)', borderRadius: 9, padding: '8px 12px', font: 'inherit' }} />
+                <Button disabled={busy === 'promo' || !promo.trim()} onClick={() => void redeemPromo()}>{busy === 'promo' ? 'Applying…' : 'Redeem'}</Button>
+              </div>
+            </section>
+          )}
 
           {/* Auto-recharge */}
           <section style={{ border: '1px solid var(--line)', borderRadius: 14, background: 'var(--surface)', padding: 18, boxShadow: 'var(--shadow-card)' }}>
