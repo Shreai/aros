@@ -20,6 +20,45 @@ item resolves to the **purchase deal/group it came in under, with comments**.
   surfaces, checkout, or anything that duplicates REGULARS (see §Patent
   adjacency). No marketing email. No price optimisation in v1.
 
+## FOUNDER DECISIONS — RESOLVED 2026-07-23 (all three probed against live Cortex)
+
+**D1 — Customer key = card type + last 4–5 + cardholder name.** No processor
+token is required. Founder's proposal validated against real data: in the live
+sample, brand+last4 alone yields **232** distinct identities; adding cardholder
+name yields **237** — i.e. the name resolved **5 genuine collisions** (~2%).
+Cardholder name is present on **242 of 476** payment rows (51%), expiry on 247.
+Design: composite key = `cardType | last4 | normalized(cardHolderName)`, with
+expiry as an additional discriminator where present. **When the name is absent,
+fall back to brand+last4 but mark the match LOW CONFIDENCE and route it to the
+`merge_candidate` review queue — never auto-merge.** Cardholder name is
+permitted under PCI (the PAN is what must be unreadable) but is PII: access-
+controlled, never logged, never shown beyond the owner's own workspace.
+
+**D2 — One resolver. AROS and REGULARS are both Nirlab products.** Founder
+confirms shared ownership, so the canonical customer/product resolver lives
+ONCE in the shared golden layer (`canonical_entity` + `createGoldenStore()`),
+and both products are views over it. This settles the earlier open question in
+favour of a single graph — no fork, no parallel identity system.
+
+**D3 — "Deal" = a TIERED BULK VENDOR PROMO** that improves buy-side margin
+(e.g. buy 1 case → $1 off; buy 3 cases → $10 off). This is distinct from
+`deal-hunter.ts`'s single-SKU promo price — **rename that skill's concept or
+the UI term; two meanings of "deal" is a support burden.**
+**Data verdict (probed): deal TERMS are NOT available.** `rapidrms.
+promotion_snapshot` exists but has **0 rows** (empty sync scaffold);
+`purchase_order` and `cost_ledger_po_progress` are **0 rows**; the promotion
+endpoints (`/api/Discount/SalesByPromotion`, `/Promotion`) return 400/404.
+**But the deal OUTCOME is available**, which is what actually drives margin:
+`rapidrms.cost_ledger` has **76,338 rows** with `item_code`, `upc`,
+`event_type`, `qty`, `uom`, **`units_per_case`**, `unit_cost`, `qty_after`,
+`avg_cost_after`, `source`, `source_ref`, `event_at`; plus
+`rapidrms.item_vendor` (**81,942 rows**) and `rapidrms.vendor` (39).
+So v1 shows the realised cost effect — *"when you took 3 cases on 12 July your
+unit cost was $18.40 against your usual $19.60"* — sourced from real rows,
+rather than claiming terms we cannot see. Capturing the terms themselves is
+either owner-entered (from the rep's sheet, with the comment field) or a
+future endpoint/BOS discovery, and is explicitly a separate increment.
+
 ## HARD CONSTRAINTS (design WITH these, not around them)
 
 ### C1 — PCI: never store a card number
