@@ -25,6 +25,22 @@ import { handlePublicBusinessApi } from './public/customer-api.js';
 import { validateAddMemberInput, INVITEE_NOT_REGISTERED } from './workspace-members.js';
 import { parsePlatformAdmins, isPlatformAdmin } from './platform-admin.js';
 import { NOTIFICATION_CATALOG, NOTIFICATION_CHANNELS, mergePreferences, validatePreferenceUpdate, isEnabled, type PreferenceRow } from './notifications.js';
+import { parseAutomationSentence, type ParsedAutomation } from './automation/parse.js';
+import {
+  buildDestinationRef,
+  canonicalFingerprint,
+  channelLabel,
+  confirmationCard,
+  describeRule,
+  detectConfirmReply,
+  evaluateCreatePreconditions,
+  MAX_ENABLED_RULES,
+  maskDestination,
+  resolveRuleRef,
+  triggerLabel,
+  type ExistingRule,
+  type RuleSpec,
+} from './automation/rules.js';
 import { sendEmail, emailConfigured } from './email.js';
 import { sendSms, smsConfigured } from './sms.js';
 import { formatWeeklyBrief, formatDailySales, formatLowStock, type DigestBody } from './digest-email.js';
@@ -3568,6 +3584,389 @@ async function handleArosSalesChat(req: IncomingMessage, res: ServerResponse, bo
   }
 }
 
+// ── Automation rules — chat registration (slice 1a, INERT) ────────────────
+// Mission: docs/missions/aros-automation-rules.md. This slice registers,
+// lists, disables, and deletes rules only — NO sentinel runs and NOTHING
+// sends. The confirm flow is STATELESS: the confirm card embeds the proposed
+// rule, and when the next user turn answers it, the payload is recovered from
+// message history and RE-VALIDATED server-side (role, destination binding,
+// caps, dupes) before any row is written — a tampered history cannot mint
+// authority the user doesn't have.
+
+const AUTOMATION_REQUIRED_CONNECTOR: Record<string, string> = {
+  transaction_voided: 'rapidrms-api',
+};
+
+type AutomationRow = {
+  id: string;
+  tenant_id: string;
+  kind: 'event' | 'schedule';
+  trigger_type: string | null;
+  report_type: string | null;
+  channel: 'email' | 'sms';
+  destination_ref: string;
+  cadence: { freq: 'daily' | 'weekly'; time?: string; tz?: string } | null;
+  status: string;
+  fingerprint: string;
+  created_at: string;
+  last_checked: string | null;
+  last_fired: string | null;
+};
+
+const AUTOMATION_COLUMNS = 'id,tenant_id,kind,trigger_type,report_type,channel,destination_ref,cadence,status,fingerprint,created_at,last_checked,last_fired';
+
+async function automationRulesForTenant(tenantId: string): Promise<AutomationRow[]> {
+  const supabase = createSupabaseAdmin();
+  const { data, error } = await supabase
+    .from('event_subscriptions')
+    .select(AUTOMATION_COLUMNS)
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as AutomationRow[];
+}
+
+async function automationConnectorConnected(tenantId: string, triggerType: string | null | undefined): Promise<boolean> {
+  const required = triggerType ? AUTOMATION_REQUIRED_CONNECTOR[triggerType] : undefined;
+  if (!required) return false;
+  const supabase = createSupabaseAdmin();
+  const { data } = await supabase
+    .from('tenant_connectors')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('type', required)
+    .eq('status', 'connected')
+    .limit(1);
+  return Boolean(data?.length);
+}
+
+/**
+ * Destination binding (authority rail): alerts only go to prefs-registered
+ * destinations. Email is always registered (account email fallback); SMS
+ * requires a phone saved in notification_preferences.
+ */
+async function automationDestination(tenantId: string, userId: string, channel: 'email' | 'sms'): Promise<{ registered: boolean; label: string }> {
+  if (channel === 'email') {
+    const supabase = createSupabaseAdmin();
+    const { data } = await supabase
+      .from('notification_preferences')
+      .select('destination')
+      .eq('tenant_id', tenantId)
+      .eq('user_id', userId)
+      .eq('channel', 'email')
+      .not('destination', 'is', null)
+      .limit(1);
+    return { registered: true, label: maskDestination('email', data?.[0]?.destination ?? null) };
+  }
+  const supabase = createSupabaseAdmin();
+  const { data } = await supabase
+    .from('notification_preferences')
+    .select('destination')
+    .eq('tenant_id', tenantId)
+    .eq('user_id', userId)
+    .eq('channel', 'sms')
+    .not('destination', 'is', null)
+    .limit(1);
+  const destination = data?.[0]?.destination as string | undefined;
+  return { registered: Boolean(destination), label: maskDestination('sms', destination ?? null) };
+}
+
+function automationReply(res: ServerResponse, tenantId: string, content: string, extra: Record<string, unknown> = {}): true {
+  json(res, 200, {
+    content,
+    _shre: { model: 'aros-automation', toolsUsed: [], mode: 'aros-automation-direct', tenantId, ...extra },
+  });
+  return true;
+}
+
+const AUTOMATION_PREFS_HINT = 'For safety, alerts can only go to destinations saved in your notification preferences — chat never sends to a number or address typed in the moment. Add your destination on the Notifications page (/notifications), then ask me again.';
+
+async function saveConfirmedAutomation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  rule: RuleSpec,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  // Re-validate EVERYTHING — the payload round-tripped through the client.
+  if (rule.tenant_id !== tenantId) {
+    return automationReply(res, tenantId, 'That confirmation was for a different workspace, so I discarded it. Please ask again from the workspace you want the alert in.');
+  }
+  const destination = await automationDestination(tenantId, auth.userId, rule.channel);
+  const rules = await automationRulesForTenant(tenantId);
+  const enabled = rules.filter((r) => r.status !== 'disabled');
+  const sameType = enabled.filter((r) => (rule.kind === 'event' ? r.trigger_type === rule.trigger_type : r.report_type === rule.report_type)) as ExistingRule[];
+  const fingerprint = canonicalFingerprint(rule);
+  const connectorConnected = await automationConnectorConnected(tenantId, rule.trigger_type);
+  const verdict = evaluateCreatePreconditions(rule, {
+    role: auth.role,
+    existingRulesCount: enabled.length,
+    existingSameTypeRules: sameType,
+    connectorConnected,
+    destinationRegistered: destination.registered,
+    fingerprint,
+    stage: 'save',
+  });
+
+  if (verdict.decision === 'reject_role') {
+    return automationReply(res, tenantId, 'Only a workspace owner or admin can create automation rules. Ask an owner/admin to set this up.');
+  }
+  if (verdict.decision === 'reject_destination') {
+    return automationReply(res, tenantId, AUTOMATION_PREFS_HINT);
+  }
+  if (verdict.decision === 'duplicate_exact') {
+    return automationReply(res, tenantId, `You already have this rule (created ${verdict.existing.created_at.slice(0, 10)}) — it's ${verdict.existing.status.replace(/_/g, ' ')}. Nothing new was created.`);
+  }
+  if (verdict.decision === 'reject_cap') {
+    return automationReply(res, tenantId, `This workspace already has ${verdict.cap} enabled automation rules — that's the limit. Disable or delete one first ("list my alerts").`);
+  }
+
+  const status = verdict.decision === 'pending_connector' ? 'pending_connector' : 'active';
+  const supabase = createSupabaseAdmin();
+  const { data: inserted, error } = await supabase
+    .from('event_subscriptions')
+    .insert({
+      tenant_id: tenantId,
+      created_by: auth.userId,
+      created_via: 'chat',
+      kind: rule.kind,
+      trigger_type: rule.trigger_type ?? null,
+      report_type: rule.report_type ?? null,
+      params: rule.params ?? {},
+      channel: rule.channel,
+      destination_ref: rule.destination_ref,
+      cadence: rule.cadence ?? null,
+      status,
+      fingerprint,
+    })
+    .select('id,created_at')
+    .single();
+  if (error) {
+    // Unique violation = a concurrent create won the race; same dupe answer.
+    if (error.code === '23505') {
+      return automationReply(res, tenantId, "You already have this rule — it's active. Nothing new was created.");
+    }
+    throw new Error(error.message);
+  }
+
+  await auditLog({
+    tenantId,
+    userId: auth.userId,
+    action: 'automation.rule_created',
+    resource: `event_subscription:${inserted.id}`,
+    detail: { kind: rule.kind, trigger_type: rule.trigger_type ?? null, report_type: rule.report_type ?? null, channel: rule.channel, status, created_via: 'chat' },
+    ip: getClientIp(req),
+  });
+
+  const what = rule.kind === 'event' ? `when ${triggerLabel(rule.trigger_type)}` : `${rule.report_type} on schedule`;
+  if (status === 'pending_connector') {
+    return automationReply(res, tenantId, `Saved — I'll ${channelLabel(rule.channel)} ${destination.label} ${what}. It's **waiting on your store connection**: no POS is connected yet, so it activates automatically once you connect one (Connections page, /onboarding) and will never alert on history from before activation.`);
+  }
+  return automationReply(res, tenantId, `Done — your rule is **active**. I'll ${channelLabel(rule.channel)} ${destination.label} ${what}. Alert delivery goes live with the automation engine rollout; you can check it anytime with "list my alerts".`);
+}
+
+async function handleAutomationSubscribe(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  parsed: ParsedAutomation,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  if (parsed.destination_free_text) {
+    return automationReply(res, tenantId, AUTOMATION_PREFS_HINT);
+  }
+  if (parsed.kind === 'schedule' && parsed.supported === false) {
+    return automationReply(res, tenantId, "Scheduled shift/tender reports aren't available yet — your POS doesn't expose a verified shift/tender feed, and I won't guess at numbers. I can alert you when a transaction is voided (\"text me when someone voids a transaction\").");
+  }
+  if (parsed.kind !== 'event' || parsed.trigger_type !== 'transaction_voided' || !parsed.channel) {
+    return automationReply(res, tenantId, 'I can set up void alerts today ("text me when someone voids a transaction"). Other automation triggers are coming.');
+  }
+
+  const rule: RuleSpec = {
+    tenant_id: tenantId,
+    kind: 'event',
+    trigger_type: parsed.trigger_type,
+    scope: 'all-stores',
+    channel: parsed.channel,
+    destination_ref: buildDestinationRef(parsed.channel, auth.userId),
+    cadence: null,
+    params: {},
+  };
+  const destination = await automationDestination(tenantId, auth.userId, rule.channel);
+  const rules = await automationRulesForTenant(tenantId);
+  const enabled = rules.filter((r) => r.status !== 'disabled');
+  const sameType = enabled.filter((r) => r.trigger_type === rule.trigger_type) as ExistingRule[];
+  const connectorConnected = await automationConnectorConnected(tenantId, rule.trigger_type);
+  const verdict = evaluateCreatePreconditions(rule, {
+    role: auth.role,
+    existingRulesCount: enabled.length,
+    existingSameTypeRules: sameType,
+    connectorConnected,
+    destinationRegistered: destination.registered,
+    fingerprint: canonicalFingerprint(rule),
+    stage: 'propose',
+  });
+
+  if (verdict.decision === 'reject_role') {
+    return automationReply(res, tenantId, 'Only a workspace owner or admin can create automation rules. Ask an owner/admin to set this up.');
+  }
+  if (verdict.decision === 'reject_destination') {
+    return automationReply(res, tenantId, `I don't have a registered mobile number for you yet. ${AUTOMATION_PREFS_HINT}`);
+  }
+  if (verdict.decision === 'duplicate_exact') {
+    return automationReply(res, tenantId, `You already have this rule (created ${verdict.existing.created_at.slice(0, 10)}) — it's ${verdict.existing.status.replace(/_/g, ' ')}.`);
+  }
+  if (verdict.decision === 'reject_cap') {
+    return automationReply(res, tenantId, `This workspace already has ${verdict.cap} enabled automation rules — that's the limit. Disable or delete one first ("list my alerts").`);
+  }
+
+  const similar = verdict.decision === 'similar_exists'
+    ? verdict.similar.map((s, i) => ({
+        // Same numbering as the "list my alerts" answer (full list, created_at asc).
+        index: rules.findIndex((r) => r.id === s.id) + 1 || i + 1,
+        description: describeRule(s as AutomationRow),
+        created_at: s.created_at,
+      }))
+    : [];
+  const card = confirmationCard(rule, {
+    destinationLabel: destination.label,
+    connectorConnected,
+    similar,
+  });
+  return automationReply(res, tenantId, card, { pendingConfirm: true });
+}
+
+async function handleAutomationManage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  parsed: ParsedAutomation,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  const rules = await automationRulesForTenant(tenantId);
+
+  if (parsed.action === 'list') {
+    if (!rules.length) {
+      return automationReply(res, tenantId, 'You don\'t have any automation rules yet. Try: "text me when someone voids a transaction".');
+    }
+    const lines = ['**Your automations**'];
+    for (const [i, r] of rules.entries()) {
+      lines.push(`${i + 1}. ${describeRule(r)} — created ${r.created_at.slice(0, 10)}${r.last_fired ? `, last fired ${r.last_fired.slice(0, 10)}` : ', never fired'}`);
+    }
+    lines.push('');
+    lines.push('Say "pause rule N" or "delete rule N" to manage one.');
+    return automationReply(res, tenantId, lines.join('\n'));
+  }
+
+  // disable / delete are owner/admin-gated (list stays member-visible).
+  if (!['owner', 'admin'].includes(auth.role)) {
+    return automationReply(res, tenantId, 'Only a workspace owner or admin can change automation rules.');
+  }
+  // Resolve against the FULL list in created_at order — the same numbering
+  // the "list my alerts" answer showed the user.
+  const resolved = resolveRuleRef(rules, parsed.rule_ref);
+  if ('error' in resolved) {
+    if (resolved.error === 'ambiguous') {
+      return automationReply(res, tenantId, 'You have more than one matching rule — say "list my alerts" and tell me which number to change (e.g. "pause rule 2").');
+    }
+    return automationReply(res, tenantId, 'I couldn\'t find a matching automation rule. Say "list my alerts" to see what\'s set up.');
+  }
+  const rule = resolved.rule;
+  const supabase = createSupabaseAdmin();
+  if (parsed.action === 'disable') {
+    if (rule.status === 'disabled') {
+      return automationReply(res, tenantId, 'That rule is already disabled — nothing to change.');
+    }
+    const { error } = await supabase
+      .from('event_subscriptions')
+      .update({ status: 'disabled', updated_at: new Date().toISOString() })
+      .eq('id', rule.id)
+      .eq('tenant_id', tenantId);
+    if (error) throw new Error(error.message);
+    await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_disabled', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel }, ip: getClientIp(req) });
+    return automationReply(res, tenantId, `Paused — the ${channelLabel(rule.channel)} rule for "${rule.kind === 'event' ? triggerLabel(rule.trigger_type) : rule.report_type}" is now disabled. Re-create it anytime.`);
+  }
+  const { error } = await supabase
+    .from('event_subscriptions')
+    .delete()
+    .eq('id', rule.id)
+    .eq('tenant_id', tenantId);
+  if (error) throw new Error(error.message);
+  await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_deleted', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel }, ip: getClientIp(req) });
+  return automationReply(res, tenantId, `Deleted — the ${channelLabel(rule.channel)} rule for "${rule.kind === 'event' ? triggerLabel(rule.trigger_type) : rule.report_type}" is gone.`);
+}
+
+/**
+ * Chat entry point for automation intents. Runs in the direct-intent layer
+ * BEFORE router proxying (and before the sales/store-data intents, which
+ * would otherwise swallow "…voids a transaction" as a sales question).
+ */
+async function handleArosAutomationChat(req: IncomingMessage, res: ServerResponse, body: Record<string, unknown> | null): Promise<boolean> {
+  if (!isArosChatContext(req, body)) return false;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const confirmState = detectConfirmReply(messages);
+  const parsed = parseAutomationSentence(chatLatestText(body));
+  if (!confirmState && !parsed) return false;
+  // A pending confirm answered with something that is neither confirm/cancel
+  // nor a new automation sentence falls through to the normal chat path — the
+  // card is simply abandoned (stateless, nothing was saved).
+  if (confirmState?.state === 'other' && !parsed) return false;
+
+  const tenantId = arosChatTenant(req, body);
+  if (!UUID_RE.test(tenantId)) return false;
+
+  try {
+    const auth = await authenticateRequest(req);
+    if (!auth || auth.tenantId !== tenantId) {
+      // Fail closed: without a verified session there is no role, so no
+      // rule management of any kind.
+      return automationReply(res, tenantId, 'I couldn\'t verify your sign-in for this workspace, so I can\'t manage automations right now. Refresh, sign in, and try again.');
+    }
+
+    if (confirmState?.state === 'cancel') {
+      return automationReply(res, tenantId, 'Okay — discarded. Nothing was saved.');
+    }
+    if (confirmState?.state === 'confirm') {
+      return await saveConfirmedAutomation(req, res, auth, confirmState.rule);
+    }
+    if (!parsed) return false;
+    if (parsed.action === 'subscribe') return await handleAutomationSubscribe(req, res, auth, parsed);
+    return await handleAutomationManage(req, res, auth, parsed);
+  } catch (err) {
+    console.error('[aros-automation-chat]', err instanceof Error ? err.message : err);
+    return automationReply(res, tenantId, 'Automation rules could not be reached right now — nothing was changed. Please try again in a moment.', { error: 'automation_unavailable' });
+  }
+}
+
+/** GET /api/automations — authed, own-tenant rules list (for the UI slice). */
+async function handleAutomationsList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  try {
+    const rules = await automationRulesForTenant(auth.tenantId);
+    json(res, 200, {
+      automations: rules.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        trigger_type: r.trigger_type,
+        report_type: r.report_type,
+        channel: r.channel,
+        cadence: r.cadence,
+        status: r.status,
+        created_at: r.created_at,
+        last_checked: r.last_checked,
+        last_fired: r.last_fired,
+        description: describeRule(r),
+      })),
+      maxEnabledRules: MAX_ENABLED_RULES,
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[automations.list]', err instanceof Error ? err.message : err);
+    json(res, 502, { error: 'Automations could not be retrieved' });
+  }
+}
+
 type ChatStoreIntent =
   | { kind: 'top_items'; from: string; to: string; limit: number }
   | { kind: 'item_changes'; mode: 'recently_added' | 'recently_edited' | 'recent_price_changes' | 'recent_cost_changes'; limit: number }
@@ -5586,6 +5985,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname === '/v1/chat' && method === 'POST') {
     const body = await parseJsonBody(req);
     if (await handleArosHealthPing(req, res, body)) return;
+    // Automation intents run before the data intents: "text me when someone
+    // voids a transaction" would otherwise be swallowed as a sales question.
+    if (await handleArosAutomationChat(req, res, body)) return;
     if (await handleArosStoreDataChat(req, res, body)) return;
     if (await handleArosSalesChat(req, res, body)) return;
     return proxyRequest(req, res, SHRE_ROUTER_URL, body);
@@ -5856,6 +6258,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (workspaceMembersMatch && ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return handleWorkspaceMembersCompat(req, res, workspaceMembersMatch[1], workspaceMembersMatch[2]);
   if (pathname === '/api/notifications/preferences' && (method === 'GET' || method === 'PUT')) {
     return handleNotificationPreferences(req, res);
+  }
+  if (pathname === '/api/automations' && method === 'GET') {
+    return handleAutomationsList(req, res);
   }
   const platformMatch = pathname.match(/^\/api\/platform\/(overview|tenants|audit)(?:\/([0-9a-f-]+))?$/);
   if (platformMatch && method === 'GET') return handlePlatformConsole(req, res, platformMatch[1], platformMatch[2]);
