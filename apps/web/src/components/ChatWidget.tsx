@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import { useVoice, cancelSpeech, type VoiceApi } from '../aros-ai/voice';
+import { IconMic, IconSend, IconSpeakOn, IconSpeakOff } from '../aros-ai/composerIcons';
 
 // Chat API — local dev only; production uses offline knowledge base
 const CHAT_API = (window as any).__CHAT_API_URL__
@@ -185,22 +186,8 @@ export function ChatWidget() {
             )}
           </div>
 
-          {/* Input */}
+          {/* Input — canonical order: input · mic · converse · send (Shre Composer contract) */}
           <form onSubmit={handleSubmit} style={s.inputBar}>
-            {voice.supported && (
-              <button
-                type="button"
-                onClick={toggleVoiceConvo}
-                aria-pressed={voiceConvo}
-                title={voiceConvo ? 'Voice conversation on — replies are read aloud' : 'Start a voice conversation'}
-                style={{ ...s.voiceBtn, ...(voiceConvo ? s.voiceBtnOn : null) }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                  {voiceConvo ? <><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></> : <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>}
-                </svg>
-              </button>
-            )}
             <input
               ref={inputRef}
               type="text"
@@ -220,17 +207,27 @@ export function ChatWidget() {
                 title={voice.listening ? 'Stop dictation' : 'Dictate a message'}
                 style={{ ...s.voiceBtn, color: voice.listening ? '#ef4444' : '#6b7280' }}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>
+                <IconMic size={16} />
+              </button>
+            )}
+            {voice.supported && (
+              <button
+                type="button"
+                onClick={toggleVoiceConvo}
+                aria-pressed={voiceConvo}
+                title={voiceConvo ? 'Voice conversation on — replies are read aloud' : 'Start a voice conversation'}
+                style={{ ...s.voiceBtn, ...(voiceConvo ? s.voiceBtnOn : null) }}
+              >
+                {voiceConvo ? <IconSpeakOn size={16} /> : <IconSpeakOff size={16} />}
               </button>
             )}
             <button
               type="submit"
               disabled={loading || !input.trim()}
+              aria-label="Send message"
               style={!input.trim() || loading ? { ...s.sendBtn, opacity: 0.4 } : s.sendBtn}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-              </svg>
+              <IconSend size={16} />
             </button>
           </form>
 
