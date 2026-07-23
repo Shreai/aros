@@ -660,7 +660,6 @@ async function notifyWorkspace(
         }
         if (to) void sendEmail(to, subject, body.text, body.html, AROS_BRAND.replyTo || undefined);
       }
-      if (to) void sendEmail(to, subject, `${text}\n\n— AROS · app.aros.live\nManage notifications: https://app.aros.live/notifications`);
       // SMS: opt-in only (sms defaults off), requires an explicit destination
       // number, and stays inert until Twilio is configured.
       if (smsConfigured() && isEnabled(prefs, event, 'sms')) {
