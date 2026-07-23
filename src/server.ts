@@ -454,14 +454,14 @@ async function runTenantVoidSentinel(
   const ledgerWindowStart = new Date(Date.parse(`${from}T00:00:00Z`) - 86_400_000).toISOString();
   const { data: firedRows } = await supabase
     .from('automation_fires')
-    .select('invoice_no,channel,destination,created_at')
+    .select('invoice_no,created_at')
     .eq('tenant_id', tenantId)
     .gte('created_at', ledgerWindowStart);
   const alreadyFired = new Set<string>();
   const todayMidnight = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).toISOString();
   let firesToday = 0;
   for (const row of firedRows ?? []) {
-    alreadyFired.add(fireDedupeKey(String(row.invoice_no), String(row.channel), row.destination == null ? null : String(row.destination)));
+    alreadyFired.add(fireDedupeKey(tenantId, String(row.invoice_no)));
     if (String(row.created_at) >= todayMidnight) firesToday += 1;
   }
 
@@ -471,16 +471,19 @@ async function runTenantVoidSentinel(
   for (const rule of activeRules) {
     const delivery = resolveRuleDelivery(rule, prefRows);
     if (!delivery.deliverable) continue;
-    const voids = newVoidsForRule(invoices, { watermark: rule.watermark, alreadyFired, channel: rule.channel, destination: delivery.destination });
+    const voids = newVoidsForRule(invoices, { watermark: rule.watermark, alreadyFired, tenantId, storeTimezone: tz });
     for (const v of voids) {
       candidates.push({ rule, invoiceNo: v.invoiceNo, channel: rule.channel, destination: delivery.destination, invoice: { invoiceNo: v.invoiceNo, amount: v.amount, timestamp: v.timestamp, businessDate: v.businessDate } });
     }
   }
+  // Per-invoice coalescing: one physical notifyWorkspace call per void covers
+  // every opted-in member/channel, so a single fire per invoice is both correct
+  // and keeps the no-double-send guarantee off any mutable field. The winning
+  // candidate's rule carries the fire attribution (per-rule rate counter).
   const coalesced = coalesceFires(candidates);
 
   // ── 5) Deliver with volume caps. ────────────────────────────────────────
   const storeLabel = connectorRow.name || 'your store';
-  const sentInvoices = new Set<string>();
   const suspendedThisPass = new Set<string>();
   let tenantCapLogged = false;
   for (const c of coalesced) {
@@ -504,18 +507,19 @@ async function runTenantVoidSentinel(
       continue;
     }
 
-    // ── CLAIM-BEFORE-SEND (H1/H2): reserve the (invoice, channel, destination)
-    // row FIRST in the unique ledger. A returned id = we own this fire; no row
-    // (ON CONFLICT) = a prior pass or another replica already sent it → skip
-    // entirely (no send, no counter bump). This is intentionally AT-MOST-ONCE:
-    // a send that throws AFTER a successful claim is a MISSED alert, never
-    // retried — for owner-facing SMS one rare miss beats duplicate spam
-    // (contract priority: never overfire).
+    // ── CLAIM-BEFORE-SEND (H1/H2 + Fix B): reserve the PER-INVOICE row FIRST
+    // in the unique ledger (UNIQUE (tenant_id, invoice_no) — an immutable key,
+    // independent of the resolved destination). A returned id = we own this
+    // fire; no row (ON CONFLICT) = a prior pass or another replica already sent
+    // it → skip entirely (no send, no counter bump). Intentionally
+    // AT-MOST-ONCE: a send that throws AFTER a successful claim is a MISSED
+    // alert, never retried — for owner-facing SMS one rare miss beats duplicate
+    // spam (contract priority: never overfire).
     let claimId: string | null = null;
     try {
       const { data: claimed, error: claimErr } = await supabase
         .from('automation_fires')
-        .upsert(automationFireClaim(tenantId, { rule_id: c.rule.id, invoiceNo: c.invoiceNo, channel: c.channel, destination: c.destination }), { onConflict: 'tenant_id,invoice_no,channel,destination', ignoreDuplicates: true })
+        .upsert(automationFireClaim(tenantId, { rule_id: c.rule.id, invoiceNo: c.invoiceNo, channel: c.channel, destination: c.destination }), { onConflict: 'tenant_id,invoice_no', ignoreDuplicates: true })
         .select('id');
       if (claimErr) {
         console.error('[automation-sentinel] claim insert failed — NOT sending:', c.invoiceNo, claimErr.message);
@@ -528,16 +532,12 @@ async function runTenantVoidSentinel(
     }
     if (!claimId) continue; // already claimed elsewhere — do NOT send, do NOT count
 
-    // Claimed → deliver. One notifyWorkspace call per invoice fans out to every
-    // subscribed member/channel, so a single physical send covers all
-    // destinations even when two different-channel rules hit the same invoice
-    // (each claims its own ledger row; only one network send happens).
+    // Claimed → deliver. Candidates are already coalesced to one per invoice,
+    // and one notifyWorkspace call fans out to every opted-in member/channel,
+    // so this is exactly one physical send per void.
     try {
-      if (!sentInvoices.has(c.invoiceNo)) {
-        const msg = voidAlertMessage(storeLabel, c.invoice);
-        await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
-        sentInvoices.add(c.invoiceNo);
-      }
+      const msg = voidAlertMessage(storeLabel, c.invoice);
+      await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
     } catch (sendErr) {
       // Claimed but delivery threw → AT-MOST-ONCE: mark and move on, never
       // retry. The claim row stays and blocks a refire on the next pass (by
@@ -553,7 +553,7 @@ async function runTenantVoidSentinel(
     c.rule.fires_in_window = rate.nextFiresInWindow;
     c.rule.window_started_at = rate.nextWindowStartedAt;
     await auditLog({ tenantId, action: 'automation.rule_fired', resource: c.invoiceNo, detail: { rule_id: c.rule.id, channel: c.channel, destination: c.destination, amount: c.invoice.amount, fire_id: claimId }, ip: 'scheduler' });
-    alreadyFired.add(fireDedupeKey(c.invoiceNo, c.channel, c.destination));
+    alreadyFired.add(fireDedupeKey(tenantId, c.invoiceNo));
     firesToday += 1;
   }
 }

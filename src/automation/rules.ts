@@ -417,27 +417,45 @@ export function isAfterWatermark(eventTime: string | null | undefined, watermark
   return et > wm;
 }
 
+/** The calendar day (YYYY-MM-DD) an instant falls on in a given IANA timezone.
+ * Deterministic (ICU tz data). Null on an unparseable instant / unknown tz. */
+export function calendarDayInTz(iso: string, tz: string): string | null {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  try {
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
+    return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Fail-closed CALENDAR-DAY comparison for timestamp-less rows. A void with
  * only a business date can only be placed to the day, so it fires ONLY when its
  * day is strictly after the watermark's day — a SAME-day void (which may
  * predate a same-day activation) is suppressed. This closes the activation-day
- * backlog hole an end-of-day timestamp fallback would open. */
-export function isBusinessDayAfterWatermark(businessDate: string | null | undefined, watermark: string | null | undefined): boolean {
+ * backlog hole an end-of-day timestamp fallback would open. The POS business
+ * date is STORE-LOCAL, so the watermark is compared in the SAME store timezone
+ * (comparing a store-local date against a UTC-sliced day misfires for an
+ * east-of-UTC store whose local day has already rolled). */
+export function isBusinessDayAfterWatermark(businessDate: string | null | undefined, watermark: string | null | undefined, tz?: string | null): boolean {
   if (!businessDate || !watermark) return false;
   const day = businessDate.slice(0, 10);
-  const wmDay = watermark.slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !/^\d{4}-\d{2}-\d{2}$/.test(wmDay)) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const wmDay = tz ? calendarDayInTz(watermark, tz) : watermark.slice(0, 10);
+  if (!wmDay || !/^\d{4}-\d{2}-\d{2}$/.test(wmDay)) return false;
   return day > wmDay;
 }
 
 /** PURE: does this voided invoice PROVABLY post-date the activation watermark?
  * Precise when the row carries a timestamp (strictly after); otherwise it falls
- * back to the fail-closed calendar-day rule above — never an end-of-day stamp
- * that could jump a same-day backlog void past a same-day activation. */
-export function voidIsAfterWatermark(inv: { timestamp: string | null; businessDate: string | null }, watermark: string | null | undefined): boolean {
+ * back to the fail-closed, store-timezone-aware calendar-day rule above — never
+ * an end-of-day stamp that could jump a same-day backlog void past a same-day
+ * activation. */
+export function voidIsAfterWatermark(inv: { timestamp: string | null; businessDate: string | null }, watermark: string | null | undefined, tz?: string | null): boolean {
   if (!watermark) return false;
   if (inv.timestamp) return isAfterWatermark(inv.timestamp, watermark);
-  return isBusinessDayAfterWatermark(inv.businessDate, watermark);
+  return isBusinessDayAfterWatermark(inv.businessDate, watermark, tz);
 }
 
 export interface InvoiceLike {
@@ -457,10 +475,18 @@ export interface VoidCandidateInvoice {
   amount: number | null;
 }
 
-/** Delivery/dedupe identity for a fire: one message per (invoice, channel,
- * destination) — the coalescing + cross-pass no-refire key (contract). */
-export function fireDedupeKey(invoiceNo: string, channel: string, destination: string | null): string {
-  return `${invoiceNo}|${channel}|${destination ?? ''}`;
+/**
+ * Delivery/dedupe identity for a fire: PER-INVOICE within a tenant. One
+ * notifyWorkspace call per void fans out to EVERY opted-in member/channel from
+ * notification_preferences (independent of the triggering rule's channel), so
+ * the correct dedupe granularity is (tenant, invoice) — NOT (invoice, channel,
+ * destination). Keying on the resolved destination (a MUTABLE pref override)
+ * would let the same void re-claim under a new key if an owner edits their
+ * number mid-window → duplicate alert. This key is immutable, so the
+ * no-double-send guarantee is independent of any editable field.
+ */
+export function fireDedupeKey(tenantId: string, invoiceNo: string): string {
+  return `${tenantId}|${invoiceNo}`;
 }
 
 export interface AutomationFireClaimRow {
@@ -497,7 +523,7 @@ export function automationFireClaim(tenantId: string, candidate: { rule_id?: str
  */
 export function newVoidsForRule(
   invoices: InvoiceLike[],
-  opts: { watermark: string | null; alreadyFired: Set<string>; channel: string; destination: string | null },
+  opts: { watermark: string | null; alreadyFired: Set<string>; tenantId: string; storeTimezone?: string | null },
 ): VoidCandidateInvoice[] {
   if (!opts.watermark) return [];
   const out: VoidCandidateInvoice[] = [];
@@ -505,8 +531,8 @@ export function newVoidsForRule(
     if (!inv.isVoid) continue;
     const id = inv.invoiceNo ?? inv.recordId;
     if (!id) continue;
-    if (!voidIsAfterWatermark(inv, opts.watermark)) continue;
-    if (opts.alreadyFired.has(fireDedupeKey(id, opts.channel, opts.destination))) continue;
+    if (!voidIsAfterWatermark(inv, opts.watermark, opts.storeTimezone)) continue;
+    if (opts.alreadyFired.has(fireDedupeKey(opts.tenantId, id))) continue;
     out.push({ invoiceNo: id, recordId: inv.recordId, businessDate: inv.businessDate, timestamp: inv.timestamp, amount: inv.amount });
   }
   return out;
@@ -514,16 +540,17 @@ export function newVoidsForRule(
 
 /**
  * Delivery-time coalescing (contract): collapse overlapping rule matches so
- * exactly one fire is recorded per (invoiceNo, channel, destination). Input
- * order is preserved; the first candidate for a key wins.
+ * exactly one fire is recorded PER INVOICE (one physical notifyWorkspace call
+ * fans out to every opted-in member/channel). Input order is preserved; the
+ * first candidate for an invoice wins — its rule carries the fire attribution.
+ * Called within one tenant's candidate list, so invoiceNo is the whole key.
  */
-export function coalesceFires<T extends { invoiceNo: string; channel: string; destination: string | null }>(candidates: T[]): T[] {
+export function coalesceFires<T extends { invoiceNo: string }>(candidates: T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
   for (const c of candidates) {
-    const key = fireDedupeKey(c.invoiceNo, c.channel, c.destination);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(c.invoiceNo)) continue;
+    seen.add(c.invoiceNo);
     out.push(c);
   }
   return out;

@@ -24,6 +24,7 @@ import {
 } from '../automation/rules';
 
 const WM = '2026-07-22T12:00:00Z'; // activation watermark
+const TENANT = 'tenant-1';
 
 function inv(over: Partial<InvoiceLike> = {}): InvoiceLike {
   return { invoiceNo: 'INV-1', recordId: 'R1', businessDate: '2026-07-22', timestamp: '2026-07-22T13:00:00Z', amount: 12.5, isVoid: true, ...over };
@@ -86,8 +87,25 @@ describe('voidIsAfterWatermark (timestamp precise, else fail-closed day)', () =>
   });
 });
 
+describe('voidIsAfterWatermark — store-timezone activation-day guard (Fix A)', () => {
+  // Watermark 20:00 UTC = 2026-07-23 08:00 local in Pacific/Auckland (UTC+12),
+  // so the store-local activation day is 2026-07-23, not the UTC 2026-07-22.
+  const wmUtc = '2026-07-22T20:00:00Z';
+  const tz = 'Pacific/Auckland';
+  it('suppresses a timestamp-less void whose businessDate == the store-LOCAL watermark day', () => {
+    expect(voidIsAfterWatermark({ timestamp: null, businessDate: '2026-07-23' }, wmUtc, tz)).toBe(false);
+  });
+  it('fires a timestamp-less void on the store-local day AFTER activation', () => {
+    expect(voidIsAfterWatermark({ timestamp: null, businessDate: '2026-07-24' }, wmUtc, tz)).toBe(true);
+  });
+  it('WITHOUT the tz it would wrongly fire (proving the fix matters)', () => {
+    // UTC watermark day = 2026-07-22, so 2026-07-23 > 2026-07-22 → true (the bug).
+    expect(voidIsAfterWatermark({ timestamp: null, businessDate: '2026-07-23' }, wmUtc)).toBe(true);
+  });
+});
+
 describe('newVoidsForRule (void-diff)', () => {
-  const base = { watermark: WM, alreadyFired: new Set<string>(), channel: 'sms', destination: '+15550100' };
+  const base = { watermark: WM, alreadyFired: new Set<string>(), tenantId: TENANT };
 
   it('a new voided invoice after the watermark fires once', () => {
     const out = newVoidsForRule([inv()], base);
@@ -112,8 +130,16 @@ describe('newVoidsForRule (void-diff)', () => {
     expect(newVoidsForRule([inv({ timestamp: null, businessDate: '2026-07-23' })], base)).toHaveLength(1);
   });
   it('an already-fired void does not re-fire', () => {
-    const alreadyFired = new Set<string>([fireDedupeKey('INV-1', 'sms', '+15550100')]);
+    const alreadyFired = new Set<string>([fireDedupeKey(TENANT, 'INV-1')]);
     expect(newVoidsForRule([inv()], { ...base, alreadyFired })).toHaveLength(0);
+  });
+  it('Fix B: an already-fired void stays suppressed even if the destination changed between passes (immutable key)', () => {
+    // The ledger/dedupe key is (tenant, invoice) only — the resolved
+    // destination is NOT part of it, so an owner editing their number mid-
+    // window can never cause a re-claim / duplicate alert.
+    const alreadyFired = new Set<string>([fireDedupeKey(TENANT, 'INV-1')]);
+    expect(newVoidsForRule([inv()], { ...base, alreadyFired })).toHaveLength(0);
+    // (destination is no longer an input to newVoidsForRule at all)
   });
   it('no watermark (rule not activated) never fires, even on a fresh void', () => {
     expect(newVoidsForRule([inv()], { ...base, watermark: null })).toHaveLength(0);
@@ -125,33 +151,35 @@ describe('newVoidsForRule (void-diff)', () => {
   });
 });
 
-describe('coalesceFires (one message per invoice/channel/destination)', () => {
+describe('coalesceFires (one fire PER INVOICE — Fix B)', () => {
   const mk = (invoiceNo: string, channel: string, destination: string | null, ruleId: string) => ({ invoiceNo, channel, destination, ruleId });
   it('collapses two overlapping rules hitting the same void into one fire', () => {
     const out = coalesceFires([mk('INV-1', 'sms', '+15550100', 'ruleA'), mk('INV-1', 'sms', '+15550100', 'ruleB')]);
     expect(out).toHaveLength(1);
     expect(out[0].ruleId).toBe('ruleA'); // first wins
   });
-  it('keeps distinct channels and destinations separate', () => {
+  it('collapses the SAME invoice even across different channels/destinations (one physical send covers all)', () => {
     const out = coalesceFires([
       mk('INV-1', 'sms', '+15550100', 'a'),
       mk('INV-1', 'email', 'o@s.com', 'b'),
       mk('INV-2', 'sms', '+15550100', 'c'),
     ]);
-    expect(out).toHaveLength(3);
+    expect(out).toHaveLength(2); // INV-1 once (rule a wins), INV-2 once
+    expect(out.map((o) => o.invoiceNo)).toEqual(['INV-1', 'INV-2']);
+    expect(out[0].ruleId).toBe('a');
   });
 });
 
-describe('automationFireClaim (H1/H2 — claim key MUST equal the dedupe key)', () => {
-  it('maps the candidate onto the ledger unique columns', () => {
+describe('automationFireClaim (H1/H2 + Fix B — claim key = (tenant, invoice))', () => {
+  it('maps the candidate onto the ledger columns (channel/destination = observability only)', () => {
     const claim = automationFireClaim('t1', { rule_id: 'r1', invoiceNo: 'INV-1', channel: 'sms', destination: '+15550100' });
     expect(claim).toEqual({ tenant_id: 't1', rule_id: 'r1', invoice_no: 'INV-1', channel: 'sms', destination: '+15550100' });
   });
-  it('its key columns reconstruct exactly the coalesce/dedupe key', () => {
+  it('its UNIQUE key columns (tenant_id, invoice_no) reconstruct exactly the immutable dedupe key', () => {
     const claim = automationFireClaim('t1', { invoiceNo: 'INV-9', channel: 'email', destination: 'o@s.com' });
-    // The DB UNIQUE(tenant_id, invoice_no, channel, destination) is the send
-    // authority; the same tuple keys coalesceFires + newVoidsForRule dedupe.
-    expect(fireDedupeKey(claim.invoice_no, claim.channel, claim.destination)).toBe(fireDedupeKey('INV-9', 'email', 'o@s.com'));
+    // DB UNIQUE (tenant_id, invoice_no) is the send authority; the SAME tuple
+    // keys coalesceFires + newVoidsForRule dedupe — no mutable field involved.
+    expect(fireDedupeKey(claim.tenant_id, claim.invoice_no)).toBe(fireDedupeKey('t1', 'INV-9'));
     expect(claim.rule_id).toBeNull();
   });
 });
