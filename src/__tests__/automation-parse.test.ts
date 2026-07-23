@@ -100,6 +100,20 @@ describe('parseAutomationSentence — list / disable / delete', () => {
   });
 });
 
+describe('parseAutomationSentence — test-fire intent', () => {
+  it('recognizes a test-fire request', () => {
+    for (const sentence of ['send a test', 'test my alert', 'send me a test alert', 'test the void alert', 'fire a test']) {
+      expect(parseAutomationSentence(sentence)).toMatchObject({ action: 'test' });
+    }
+  });
+  it('resolves a numbered rule ref for the test', () => {
+    expect(parseAutomationSentence('test rule 2')).toMatchObject({ action: 'test', rule_ref: { index: 2 } });
+  });
+  it('does not treat a plain void subscription as a test', () => {
+    expect(parseAutomationSentence('text me when someone voids a transaction')).toMatchObject({ action: 'subscribe' });
+  });
+});
+
 describe('parseAutomationSentence — non-automation sentences return null', () => {
   const nonMatches = [
     'what were my sales yesterday',

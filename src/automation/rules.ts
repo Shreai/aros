@@ -367,3 +367,191 @@ export function describeRule(rule: { kind: string; trigger_type?: string | null;
   const what = rule.kind === 'event' ? `when ${triggerLabel(rule.trigger_type)}` : `${rule.report_type || 'report'} (scheduled)`;
   return `${channelLabel(rule.channel)} ${what} — ${rule.status.replace(/_/g, ' ')}`;
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Slice 1b — sentinel execution core (pure). The imperative shell in
+// src/server.ts loads rules/connectors/invoices/audit and applies these
+// decisions; everything below is deterministic data-in/data-out and unit-
+// tested in src/__tests__/automation-sentinel.test.ts.
+// ══════════════════════════════════════════════════════════════════════════
+
+/** Volume rails (contract "Volume rails"). SMS cannot be recalled — these caps
+ * bound blast radius on a data-anomaly storm (precedent: aros#109). */
+export const AUTOMATION_MAX_FIRES_PER_HOUR = 5;
+export const AUTOMATION_MAX_FIRES_PER_TENANT_DAY = 50;
+/** Business-day lookback the sentinel scans for voids each pass — a small
+ * safety window so a brief outage still catches a recent void (the watermark +
+ * per-invoice dedupe make a wider window idempotent, never a re-fire). */
+export const AUTOMATION_SENTINEL_WINDOW_DAYS = 2;
+
+// ── Activation sweep decision (pending_connector ↔ active) ───────────────────
+
+export type ActivationDecision = 'activate' | 'deactivate' | 'none';
+
+/**
+ * Idempotent, path-independent activation decision (contract "Connector
+ * precondition"). A rule waiting on a connector activates the moment one is
+ * connected (however it connected); an active rule whose connector disappeared
+ * flips back to pending_connector (visible, never a silent no-op). Everything
+ * else is a no-op — running this every pass converges without a backlog burst.
+ */
+export function decideActivation(status: string, connectorConnected: boolean): ActivationDecision {
+  if (status === 'pending_connector' && connectorConnected) return 'activate';
+  if (status === 'active' && !connectorConnected) return 'deactivate';
+  return 'none';
+}
+
+// ── Void diff (new-void detection) ───────────────────────────────────────────
+
+/** True when an event time is strictly after the activation watermark. Parses
+ * both sides (formats can differ) and fails CLOSED — an unparseable/absent
+ * event time is treated as NOT-after, so a newly-activated rule never fires on
+ * a row it cannot prove post-dates activation (contract: no retroactive fire). */
+export function isAfterWatermark(eventTime: string | null | undefined, watermark: string | null | undefined): boolean {
+  if (!watermark) return false;
+  const wm = Date.parse(watermark);
+  if (!Number.isFinite(wm)) return false;
+  if (!eventTime) return false;
+  const et = Date.parse(eventTime);
+  if (!Number.isFinite(et)) return false;
+  return et > wm;
+}
+
+export interface InvoiceLike {
+  invoiceNo: string | null;
+  recordId: string | null;
+  businessDate: string | null;
+  timestamp: string | null;
+  amount: number | null;
+  isVoid: boolean;
+}
+
+export interface VoidCandidateInvoice {
+  invoiceNo: string;
+  recordId: string | null;
+  businessDate: string | null;
+  timestamp: string | null;
+  amount: number | null;
+}
+
+/** Delivery/dedupe identity for a fire: one message per (invoice, channel,
+ * destination) — the coalescing + cross-pass no-refire key (contract). */
+export function fireDedupeKey(invoiceNo: string, channel: string, destination: string | null): string {
+  return `${invoiceNo}|${channel}|${destination ?? ''}`;
+}
+
+/**
+ * PURE: which voided invoices are NEW for one rule this pass — voided, occurred
+ * strictly after the rule's activation watermark (backlog guard), and not in
+ * the already-fired set (cross-pass dedupe). No watermark ⇒ not activated ⇒
+ * never fires. The event time is the invoice timestamp, falling back to the
+ * business date's end-of-day when no per-row timestamp exists.
+ */
+export function newVoidsForRule(
+  invoices: InvoiceLike[],
+  opts: { watermark: string | null; alreadyFired: Set<string>; channel: string; destination: string | null },
+): VoidCandidateInvoice[] {
+  if (!opts.watermark) return [];
+  const out: VoidCandidateInvoice[] = [];
+  for (const inv of invoices) {
+    if (!inv.isVoid) continue;
+    const id = inv.invoiceNo ?? inv.recordId;
+    if (!id) continue;
+    const eventTime = inv.timestamp ?? (inv.businessDate ? `${inv.businessDate}T23:59:59Z` : null);
+    if (!isAfterWatermark(eventTime, opts.watermark)) continue;
+    if (opts.alreadyFired.has(fireDedupeKey(id, opts.channel, opts.destination))) continue;
+    out.push({ invoiceNo: id, recordId: inv.recordId, businessDate: inv.businessDate, timestamp: inv.timestamp, amount: inv.amount });
+  }
+  return out;
+}
+
+/**
+ * Delivery-time coalescing (contract): collapse overlapping rule matches so
+ * exactly one fire is recorded per (invoiceNo, channel, destination). Input
+ * order is preserved; the first candidate for a key wins.
+ */
+export function coalesceFires<T extends { invoiceNo: string; channel: string; destination: string | null }>(candidates: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const c of candidates) {
+    const key = fireDedupeKey(c.invoiceNo, c.channel, c.destination);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
+// ── Volume caps ──────────────────────────────────────────────────────────────
+
+export interface RateWindow {
+  firesInWindow: number;
+  windowStartedAt: string | null;
+}
+export interface RateResult {
+  allowed: boolean;
+  /** True ⇒ this fire breaches the hourly cap; the shell suspends the rule. */
+  suspend: boolean;
+  nextFiresInWindow: number;
+  nextWindowStartedAt: string;
+}
+
+/**
+ * PURE per-rule hourly cap. Sliding fixed window: a window older than one hour
+ * resets before this fire is counted. Called ONCE per intended fire — the 6th
+ * fire inside the hour returns { allowed:false, suspend:true } and the rule is
+ * paused (contract "Volume rails" (a)).
+ */
+export function applyPerRuleRateLimit(window: RateWindow, now: string, max = AUTOMATION_MAX_FIRES_PER_HOUR): RateResult {
+  const nowMs = Date.parse(now);
+  const startMs = window.windowStartedAt ? Date.parse(window.windowStartedAt) : NaN;
+  const withinWindow = Number.isFinite(startMs) && Number.isFinite(nowMs) && nowMs - startMs < 3_600_000;
+  const currentCount = withinWindow ? window.firesInWindow : 0;
+  const windowStart = withinWindow && window.windowStartedAt ? window.windowStartedAt : now;
+  if (currentCount >= max) {
+    return { allowed: false, suspend: true, nextFiresInWindow: currentCount, nextWindowStartedAt: windowStart };
+  }
+  return { allowed: true, suspend: false, nextFiresInWindow: currentCount + 1, nextWindowStartedAt: windowStart };
+}
+
+/** PURE per-tenant daily aggregate cap (contract "Volume rails" (b)). Once the
+ * tenant has fired `max` times today, firing STOPS for that tenant (the shell
+ * logs the stop — never a silent drop). */
+export function tenantDailyCapReached(firesToday: number, max = AUTOMATION_MAX_FIRES_PER_TENANT_DAY): boolean {
+  return firesToday >= max;
+}
+
+// ── Void-alert message ───────────────────────────────────────────────────────
+
+/** The concrete alert text a fire delivers. Amount is honest about missing
+ * data (the API can omit it) rather than printing $0.00. */
+export function voidAlertMessage(
+  storeName: string,
+  invoice: { invoiceNo: string; amount: number | null; timestamp: string | null; businessDate: string | null },
+): { subject: string; text: string } {
+  const amount = typeof invoice.amount === 'number' && Number.isFinite(invoice.amount)
+    ? `$${invoice.amount.toFixed(2)}`
+    : 'an unlisted amount';
+  const when = invoice.timestamp || invoice.businessDate || 'just now';
+  return {
+    subject: `Voided transaction at ${storeName}`,
+    text: `Voided transaction at ${storeName}: ${amount}, ${when}, invoice ${invoice.invoiceNo}.`,
+  };
+}
+
+/** The paused-too-many-fires notice (sent exactly once when a rule suspends). */
+export function ruleSuspendedMessage(storeLabel: string): { subject: string; text: string } {
+  return {
+    subject: 'Automation paused — too many alerts',
+    text: `Your void alert for ${storeLabel} fired more than ${AUTOMATION_MAX_FIRES_PER_HOUR} times in an hour, so I paused it to avoid a storm of messages. Nothing else changed. Re-enable it from the Notifications page once things look normal.`,
+  };
+}
+
+/** The test-fire text — CLEARLY labeled so it is never mistaken for a real
+ * void (contract test-fire: audit-tagged test, doesn't count toward caps). */
+export function testFireMessage(storeLabel: string, channel: string): { subject: string; text: string } {
+  return {
+    subject: 'TEST — your void alert is live',
+    text: `This is a TEST of your void alert${storeLabel ? ` for ${storeLabel}` : ''}. No transaction was voided. When a real void happens I'll ${channel === 'sms' ? 'text' : 'email'} you like this. (Test messages don't count toward your alert limits.)`,
+  };
+}

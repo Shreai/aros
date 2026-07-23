@@ -17,7 +17,7 @@
  * notification-preferences flow — chat never mints a new destination.
  */
 
-export type AutomationAction = 'subscribe' | 'list' | 'disable' | 'delete';
+export type AutomationAction = 'subscribe' | 'list' | 'disable' | 'delete' | 'test';
 export type AutomationChannel = 'email' | 'sms';
 
 export interface AutomationCadence {
@@ -123,6 +123,12 @@ export function parseAutomationSentence(rawText: string): ParsedAutomation | nul
     (/\bwhat\b/.test(text) && RULE_NOUN_RE.test(text) && /\b(have|set up|setup|active|running)\b/.test(text))
   ) {
     return { action: 'list', confidence: 'high' };
+  }
+
+  // ── test-fire (checked before subscribe so "send a test of my void alert"
+  //    isn't parsed as a new subscription). Explicit "test"/"try" verb only.
+  if (/\btest\b/.test(text) && (RULE_NOUN_RE.test(text) || VOID_RE.test(text) || /\b(fire|send|trigger|run)\b/.test(text))) {
+    return { action: 'test', rule_ref: parseRuleRef(text), confidence: 'high' };
   }
 
   // ── disable / delete (checked before subscribe: "stop texting me…") ─────
