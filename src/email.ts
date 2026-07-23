@@ -13,7 +13,13 @@ export function emailConfigured(): boolean {
   return Boolean(SENDGRID_API_KEY);
 }
 
-export async function sendEmail(to: string, subject: string, text: string, html?: string): Promise<boolean> {
+/**
+ * `html` is optional and ADDITIVE: SendGrid receives text/plain first and
+ * text/html second, so a client that cannot render HTML still gets the full
+ * message. `replyTo` is only set when the brand supplies a monitored mailbox —
+ * an empty value leaves replies on the sender identity, as before.
+ */
+export async function sendEmail(to: string, subject: string, text: string, html?: string, replyTo?: string): Promise<boolean> {
   if (!SENDGRID_API_KEY) {
     console.warn('[email] SENDGRID_API_KEY not set — skipping send:', subject);
     return false;
@@ -25,6 +31,7 @@ export async function sendEmail(to: string, subject: string, text: string, html?
       body: JSON.stringify({
         personalizations: [{ to: [{ email: to }] }],
         from: { email: EMAIL_FROM, name: 'AROS' },
+        ...(replyTo ? { reply_to: { email: replyTo } } : {}),
         subject,
         content: [
           { type: 'text/plain', value: text },
