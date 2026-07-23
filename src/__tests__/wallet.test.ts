@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeBalanceUsd, isFrozen, buildWalletView, shouldAutoRecharge,
-  validateTopupUsd, validateAutoRechargeInput, ONBOARDING_GRANT_USD,
+  validateTopupUsd, validateAutoRechargeInput, ONBOARDING_GRANT_USD, parsePromoCode,
 } from '../wallet';
 
 const settings = { autoRechargeEnabled: false, autoRechargeThresholdUsd: 10, autoRechargeAmountUsd: 25, hasCard: false };
@@ -47,5 +47,19 @@ describe('validation', () => {
     expect('error' in validateAutoRechargeInput({ enabled: true, thresholdUsd: 10, amountUsd: 10 })).toBe(true); // amount <= threshold
     expect('error' in validateAutoRechargeInput({ enabled: true, thresholdUsd: 10, amountUsd: 2 })).toBe(true); // below min
     expect(validateAutoRechargeInput({ enabled: false })).toMatchObject({ enabled: false });
+  });
+});
+
+describe('parsePromoCode', () => {
+  it('parses shrepromo<N> to a dollar credit, capped at $100', () => {
+    expect(parsePromoCode('shrepromo5')).toEqual({ amountUsd: 5, code: 'shrepromo5' });
+    expect(parsePromoCode('SHREPROMO50')).toEqual({ amountUsd: 50, code: 'shrepromo50' });
+    expect(parsePromoCode('shrepromo500')).toMatchObject({ amountUsd: 100 }); // capped
+  });
+  it('rejects anything that is not shrepromo<N>', () => {
+    expect('error' in parsePromoCode('freemoney')).toBe(true);
+    expect('error' in parsePromoCode('shrepromo')).toBe(true);
+    expect('error' in parsePromoCode('shrepromo0')).toBe(true);
+    expect('error' in parsePromoCode(42)).toBe(true);
   });
 });
