@@ -25,6 +25,41 @@ import { handlePublicBusinessApi } from './public/customer-api.js';
 import { validateAddMemberInput, INVITEE_NOT_REGISTERED } from './workspace-members.js';
 import { parsePlatformAdmins, isPlatformAdmin } from './platform-admin.js';
 import { NOTIFICATION_CATALOG, NOTIFICATION_CHANNELS, mergePreferences, validatePreferenceUpdate, isEnabled, type PreferenceRow } from './notifications.js';
+import { parseAutomationSentence, type ParsedAutomation } from './automation/parse.js';
+import {
+  applyPerRuleRateLimit,
+  automationFireClaim,
+  AUTOMATION_MAX_FIRES_PER_HOUR,
+  AUTOMATION_MAX_FIRES_PER_TENANT_DAY,
+  AUTOMATION_SENTINEL_WINDOW_DAYS,
+  buildDestinationRef,
+  canonicalFingerprint,
+  channelLabel,
+  coalesceFires,
+  confirmationCard,
+  decideActivation,
+  describeRule,
+  detectConfirmReply,
+  duplicateReply,
+  evaluateCreatePreconditions,
+  fireDedupeKey,
+  insertRowForRule,
+  MAX_ENABLED_RULES,
+  maskDestination,
+  newVoidsForRule,
+  prefRowForActiveRule,
+  resolveRuleRef,
+  ruleSuspendedMessage,
+  sanitizeConfirmedRule,
+  tenantDailyCapReached,
+  testFireMessage,
+  triggerLabel,
+  voidAlertMessage,
+  type CreateDecision,
+  type ExistingRule,
+  type InvoiceLike,
+  type RuleSpec,
+} from './automation/rules.js';
 import { sendEmail, emailConfigured } from './email.js';
 import { sendSms, smsConfigured } from './sms.js';
 import { formatWeeklyBrief, formatDailySales, formatLowStock, type DigestBody } from './digest-email.js';
@@ -224,6 +259,302 @@ async function runWeeklyBriefDelivery(): Promise<void> {
     }
   } catch (err) {
     console.error('[weekly-brief]', err instanceof Error ? err.message : err);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Automation sentinel (slice 1b) — the always-running engine that fires
+// chat-registered rules. In-process loop like runDailyStoreEmails: load active
+// rules → group by tenant → sweep activation → fetch recent invoices → diff for
+// new voids past the watermark → coalesce → deliver via notifyWorkspace with
+// per-rule + per-tenant volume caps. Pure decisions live in automation/rules.ts.
+// Kill switch: AUTOMATION_RULES=0 (also skips scheduling). Runtime pause: the
+// platform_settings 'automation_paused' row (no deploy needed).
+// Mission: docs/missions/aros-automation-rules.md.
+// ══════════════════════════════════════════════════════════════════════════
+
+type SentinelRule = {
+  id: string;
+  tenant_id: string;
+  trigger_type: string | null;
+  channel: 'email' | 'sms';
+  destination_ref: string;
+  status: string;
+  watermark: string | null;
+  fires_in_window: number;
+  window_started_at: string | null;
+};
+
+const AUTOMATION_SENTINEL_COLUMNS = 'id,tenant_id,trigger_type,channel,destination_ref,status,watermark,fires_in_window,window_started_at';
+
+/** DB-level global pause (contract "Pause rails"): an operator sets the
+ * platform_settings 'automation_paused' row to halt all fires WITHOUT a deploy
+ * or restart. FAIL-SAFE: on a read error we treat the platform as PAUSED and
+ * log loudly — a send path must not fire blind when its kill-switch is
+ * unreadable. It is re-evaluated each pass, so a transient blip just skips one
+ * pass; a persistent fault halts sends (safe) and is visible in logs. The
+ * AUTOMATION_RULES env switch remains the coarse hard backstop. */
+async function automationGloballyPaused(supabase: ReturnType<typeof createSupabaseAdmin>): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from('platform_settings').select('value').eq('key', 'automation_paused').maybeSingle();
+    if (error) {
+      console.error('[automation-sentinel] pause-flag read failed — treating as PAUSED (skipping fires this pass):', error.message);
+      return true;
+    }
+    return Boolean((data?.value as { paused?: boolean } | null)?.paused);
+  } catch (err) {
+    console.error('[automation-sentinel] pause-flag read threw — treating as PAUSED (skipping fires this pass):', err instanceof Error ? err.message : err);
+    return true;
+  }
+}
+
+/** prefs:<channel>:<userId> → userId. Null for a malformed ref. */
+function userIdFromDestinationRef(ref: string): string | null {
+  const parts = ref.split(':');
+  return parts.length === 3 && parts[0] === 'prefs' ? parts[2] : null;
+}
+
+type SentinelPref = { user_id: string; event_type: string; channel: string; enabled: boolean; destination: string | null };
+
+/** Is this rule deliverable right now, and to what destination? The creator's
+ * prefs gate it (isEnabled), SMS additionally needs a configured provider. The
+ * destination (or the stable destination_ref when email falls back to the
+ * account address) keys coalescing + cross-pass dedupe. */
+function resolveRuleDelivery(rule: SentinelRule, prefRows: SentinelPref[]): { deliverable: boolean; destination: string } {
+  const userId = userIdFromDestinationRef(rule.destination_ref);
+  const prefs = prefRows.filter((p) => p.user_id === userId) as unknown as PreferenceRow[];
+  if (!isEnabled(prefs, 'void-alert', rule.channel)) return { deliverable: false, destination: rule.destination_ref };
+  if (rule.channel === 'sms' && !smsConfigured()) return { deliverable: false, destination: rule.destination_ref };
+  const destination = prefs.find((p) => p.channel === rule.channel && p.destination)?.destination ?? null;
+  return { deliverable: true, destination: destination ?? rule.destination_ref };
+}
+
+// Single-instance re-entrancy guard (H2): a slow pass must never overlap the
+// next tick on this process and double-send. The automation_fires unique ledger
+// covers the multi-replica case; this covers overlap on one instance cheaply.
+let automationSentinelRunning = false;
+
+async function runAutomationSentinel(): Promise<void> {
+  if (process.env.AUTOMATION_RULES === '0') return;
+  if (!emailConfigured()) return; // email lane is the always-live floor; nothing can deliver without it
+  if (automationSentinelRunning) {
+    console.warn('[automation-sentinel] previous pass still running — skipping this tick');
+    return;
+  }
+  automationSentinelRunning = true;
+  try {
+    const supabase = createSupabaseAdmin();
+    if (await automationGloballyPaused(supabase)) {
+      console.log('[automation-sentinel] globally paused (platform_settings.automation_paused or unreadable pause flag) — skipping this pass');
+      return;
+    }
+    // Load rules the sentinel acts on: active (evaluate + fire) and
+    // pending_connector (activation sweep). Disabled/suspended are inert.
+    const { data: rules } = await supabase
+      .from('event_subscriptions')
+      .select(AUTOMATION_SENTINEL_COLUMNS)
+      .in('status', ['active', 'pending_connector'])
+      .eq('kind', 'event')
+      .eq('trigger_type', 'transaction_voided');
+    if (!rules?.length) return;
+
+    const byTenant = new Map<string, SentinelRule[]>();
+    for (const r of rules as SentinelRule[]) {
+      if (!byTenant.has(r.tenant_id)) byTenant.set(r.tenant_id, []);
+      byTenant.get(r.tenant_id)!.push(r);
+    }
+
+    // One query for the connected RapidRMS connector of every tenant in play.
+    const { data: connectors } = await supabase
+      .from('tenant_connectors')
+      .select(`${CONNECTOR_COLUMNS}, credentials_encrypted`)
+      .eq('status', 'connected')
+      .eq('type', 'rapidrms-api')
+      .in('tenant_id', [...byTenant.keys()]);
+    const connectorByTenant = new Map<string, NonNullable<typeof connectors>[number]>();
+    for (const c of connectors ?? []) if (!connectorByTenant.has(c.tenant_id)) connectorByTenant.set(c.tenant_id, c);
+
+    for (const [tenantId, tenantRules] of byTenant) {
+      try {
+        await runTenantVoidSentinel(supabase, tenantId, tenantRules, connectorByTenant.get(tenantId) ?? null);
+      } catch (err) {
+        console.error('[automation-sentinel] tenant failed:', tenantId, err instanceof Error ? err.message : err);
+      }
+    }
+  } catch (err) {
+    console.error('[automation-sentinel]', err instanceof Error ? err.message : err);
+  } finally {
+    automationSentinelRunning = false;
+  }
+}
+
+async function runTenantVoidSentinel(
+  supabase: ReturnType<typeof createSupabaseAdmin>,
+  tenantId: string,
+  rules: SentinelRule[],
+  connectorRow: { id: string; type: string; name: string; config: unknown; credentials_encrypted: string } | null,
+): Promise<void> {
+  const connected = Boolean(connectorRow);
+  const now = new Date().toISOString();
+
+  const { data: prefData } = await supabase
+    .from('notification_preferences')
+    .select('user_id,event_type,channel,enabled,destination')
+    .eq('tenant_id', tenantId);
+  const prefRows = (prefData ?? []) as SentinelPref[];
+
+  // ── 1) Activation sweep — pending↔active per the pure decision. ──────────
+  for (const rule of rules) {
+    const decision = decideActivation(rule.status, connected);
+    if (decision === 'activate') {
+      await supabase.from('event_subscriptions').update({ status: 'active', watermark: now, updated_at: now }).eq('id', rule.id).eq('tenant_id', tenantId);
+      // Write the enabling pref row (deferred from 1a's pending save) so the
+      // delivery gate lines up, then fire the one-time "now live" notice. NO
+      // backlog: watermark = now, so nothing before this instant can fire.
+      const spec = { tenant_id: tenantId, kind: 'event', trigger_type: rule.trigger_type, channel: rule.channel, destination_ref: rule.destination_ref } as RuleSpec;
+      const userId = userIdFromDestinationRef(rule.destination_ref);
+      const destination = prefRows.find((p) => p.user_id === userId && p.channel === rule.channel && p.destination)?.destination ?? null;
+      const prefRow = userId ? prefRowForActiveRule(spec, { status: 'active', userId, destination, now }) : null;
+      if (prefRow) await supabase.from('notification_preferences').upsert(prefRow, { onConflict: 'tenant_id,user_id,event_type,channel' });
+      const storeLabel = connectorRow?.name || 'your store';
+      await notifyWorkspace(tenantId, 'void-alert', 'Your void alert is now live', `Your store is connected, so the void alert you set up is now active for ${storeLabel}. I'll ${channelLabel(rule.channel)} you the next time a transaction is voided. (It won't alert on anything from before now.)`);
+      await auditLog({ tenantId, action: 'automation.rule_activated', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel }, ip: 'scheduler' });
+      rule.status = 'active';
+      rule.watermark = now;
+    } else if (decision === 'deactivate') {
+      await supabase.from('event_subscriptions').update({ status: 'pending_connector', watermark: null, updated_at: now }).eq('id', rule.id).eq('tenant_id', tenantId);
+      await auditLog({ tenantId, action: 'automation.rule_deactivated', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel, reason: 'connector_disconnected' }, ip: 'scheduler' });
+      rule.status = 'pending_connector';
+      rule.watermark = null;
+    }
+  }
+
+  // last_checked advances for EVERY rule examined — silence must never look
+  // like "unchecked" (degraded POS below still leaves this advanced).
+  await supabase.from('event_subscriptions').update({ last_checked: now }).in('id', rules.map((r) => r.id));
+
+  const activeRules = rules.filter((r) => r.status === 'active');
+  if (!connected || !activeRules.length || !connectorRow) return;
+
+  // ── 2) Fetch recent invoices once for the tenant. ───────────────────────
+  ensureConnectorCrypto();
+  const secrets = JSON.parse(decryptValue(connectorRow.credentials_encrypted)) as Record<string, string>;
+  const record = { id: connectorRow.id, type: connectorRow.type, name: connectorRow.name, config: (connectorRow.config ?? {}) as Record<string, unknown>, secrets };
+  const tz = String((connectorRow.config as Record<string, unknown> | null)?.timezone || DEFAULT_STORE_TIMEZONE);
+  const today = businessToday(tz);
+  const from = new Date(Date.parse(`${today}T00:00:00Z`) - (AUTOMATION_SENTINEL_WINDOW_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
+  const report = await fetchStoreInvoices(record, vaultSecretFor(tenantId), from, today, 500);
+  const invoices: InvoiceLike[] = (report?.invoices ?? []).map((i) => ({ invoiceNo: i.invoiceNo, recordId: i.recordId, businessDate: i.businessDate, timestamp: i.timestamp, amount: i.amount, isVoid: i.isVoid }));
+  if (!invoices.some((i) => i.isVoid)) return;
+
+  // ── 3) Already-fired set + today's fire count from the fire LEDGER. The
+  //    automation_fires UNIQUE (tenant_id, invoice_no, channel, destination)
+  //    is the dedupe AUTHORITY (claim-before-send below); this read is only a
+  //    pre-filter to skip re-attempting known-sent voids + a daily counter. ─
+  const ledgerWindowStart = new Date(Date.parse(`${from}T00:00:00Z`) - 86_400_000).toISOString();
+  const { data: firedRows } = await supabase
+    .from('automation_fires')
+    .select('invoice_no,created_at')
+    .eq('tenant_id', tenantId)
+    .gte('created_at', ledgerWindowStart);
+  const alreadyFired = new Set<string>();
+  const todayMidnight = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).toISOString();
+  let firesToday = 0;
+  for (const row of firedRows ?? []) {
+    alreadyFired.add(fireDedupeKey(tenantId, String(row.invoice_no)));
+    if (String(row.created_at) >= todayMidnight) firesToday += 1;
+  }
+
+  // ── 4) Build fire candidates per active rule (pure void-diff). ──────────
+  type Candidate = { rule: SentinelRule; invoiceNo: string; channel: string; destination: string; invoice: { invoiceNo: string; amount: number | null; timestamp: string | null; businessDate: string | null } };
+  const candidates: Candidate[] = [];
+  for (const rule of activeRules) {
+    const delivery = resolveRuleDelivery(rule, prefRows);
+    if (!delivery.deliverable) continue;
+    const voids = newVoidsForRule(invoices, { watermark: rule.watermark, alreadyFired, tenantId, storeTimezone: tz });
+    for (const v of voids) {
+      candidates.push({ rule, invoiceNo: v.invoiceNo, channel: rule.channel, destination: delivery.destination, invoice: { invoiceNo: v.invoiceNo, amount: v.amount, timestamp: v.timestamp, businessDate: v.businessDate } });
+    }
+  }
+  // Per-invoice coalescing: one physical notifyWorkspace call per void covers
+  // every opted-in member/channel, so a single fire per invoice is both correct
+  // and keeps the no-double-send guarantee off any mutable field. The winning
+  // candidate's rule carries the fire attribution (per-rule rate counter).
+  const coalesced = coalesceFires(candidates);
+
+  // ── 5) Deliver with volume caps. ────────────────────────────────────────
+  const storeLabel = connectorRow.name || 'your store';
+  const suspendedThisPass = new Set<string>();
+  let tenantCapLogged = false;
+  for (const c of coalesced) {
+    if (tenantDailyCapReached(firesToday)) {
+      if (!tenantCapLogged) {
+        tenantCapLogged = true;
+        await auditLog({ tenantId, action: 'automation.tenant_cap_reached', resource: today, detail: { cap: AUTOMATION_MAX_FIRES_PER_TENANT_DAY, firesToday }, ip: 'scheduler' });
+        console.warn(`[automation-sentinel] tenant ${tenantId} hit the daily fire cap (${AUTOMATION_MAX_FIRES_PER_TENANT_DAY}) — stopping fires for today`);
+      }
+      break;
+    }
+    if (suspendedThisPass.has(c.rule.id)) continue;
+
+    const rate = applyPerRuleRateLimit({ firesInWindow: c.rule.fires_in_window, windowStartedAt: c.rule.window_started_at }, now);
+    if (rate.suspend) {
+      suspendedThisPass.add(c.rule.id);
+      await supabase.from('event_subscriptions').update({ status: 'suspended', updated_at: now }).eq('id', c.rule.id).eq('tenant_id', tenantId);
+      const notice = ruleSuspendedMessage(storeLabel);
+      await notifyWorkspace(tenantId, 'void-alert', notice.subject, notice.text);
+      await auditLog({ tenantId, action: 'automation.rule_suspended', resource: `event_subscription:${c.rule.id}`, detail: { reason: 'hourly_fire_cap', cap: AUTOMATION_MAX_FIRES_PER_HOUR }, ip: 'scheduler' });
+      continue;
+    }
+
+    // ── CLAIM-BEFORE-SEND (H1/H2 + Fix B): reserve the PER-INVOICE row FIRST
+    // in the unique ledger (UNIQUE (tenant_id, invoice_no) — an immutable key,
+    // independent of the resolved destination). A returned id = we own this
+    // fire; no row (ON CONFLICT) = a prior pass or another replica already sent
+    // it → skip entirely (no send, no counter bump). Intentionally
+    // AT-MOST-ONCE: a send that throws AFTER a successful claim is a MISSED
+    // alert, never retried — for owner-facing SMS one rare miss beats duplicate
+    // spam (contract priority: never overfire).
+    let claimId: string | null = null;
+    try {
+      const { data: claimed, error: claimErr } = await supabase
+        .from('automation_fires')
+        .upsert(automationFireClaim(tenantId, { rule_id: c.rule.id, invoiceNo: c.invoiceNo, channel: c.channel, destination: c.destination }), { onConflict: 'tenant_id,invoice_no', ignoreDuplicates: true })
+        .select('id');
+      if (claimErr) {
+        console.error('[automation-sentinel] claim insert failed — NOT sending:', c.invoiceNo, claimErr.message);
+        continue;
+      }
+      claimId = claimed?.[0]?.id ?? null;
+    } catch (err) {
+      console.error('[automation-sentinel] claim insert threw — NOT sending:', c.invoiceNo, err instanceof Error ? err.message : err);
+      continue;
+    }
+    if (!claimId) continue; // already claimed elsewhere — do NOT send, do NOT count
+
+    // Claimed → deliver. Candidates are already coalesced to one per invoice,
+    // and one notifyWorkspace call fans out to every opted-in member/channel,
+    // so this is exactly one physical send per void.
+    try {
+      const msg = voidAlertMessage(storeLabel, c.invoice);
+      await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
+    } catch (sendErr) {
+      // Claimed but delivery threw → AT-MOST-ONCE: mark and move on, never
+      // retry. The claim row stays and blocks a refire on the next pass (by
+      // design — no duplicate storm), so this one alert is accepted as missed.
+      console.error('[automation-sentinel] CLAIMED but SEND FAILED (alert missed, not retried):', c.invoiceNo, sendErr instanceof Error ? sendErr.message : sendErr);
+      await supabase.from('automation_fires').update({ status: 'send_failed' }).eq('id', claimId);
+      continue;
+    }
+
+    // Success bookkeeping. The ledger row is ALREADY the dedupe record, so a
+    // failure of any write below can never cause a refire.
+    await supabase.from('event_subscriptions').update({ last_fired: now, fires_in_window: rate.nextFiresInWindow, window_started_at: rate.nextWindowStartedAt, updated_at: now }).eq('id', c.rule.id).eq('tenant_id', tenantId);
+    c.rule.fires_in_window = rate.nextFiresInWindow;
+    c.rule.window_started_at = rate.nextWindowStartedAt;
+    await auditLog({ tenantId, action: 'automation.rule_fired', resource: c.invoiceNo, detail: { rule_id: c.rule.id, channel: c.channel, destination: c.destination, amount: c.invoice.amount, fire_id: claimId }, ip: 'scheduler' });
+    alreadyFired.add(fireDedupeKey(tenantId, c.invoiceNo));
+    firesToday += 1;
   }
 }
 
@@ -3568,6 +3899,486 @@ async function handleArosSalesChat(req: IncomingMessage, res: ServerResponse, bo
   }
 }
 
+// ── Automation rules — chat registration (slice 1a, INERT) ────────────────
+// Mission: docs/missions/aros-automation-rules.md. This slice registers,
+// lists, disables, and deletes rules only — NO sentinel runs and NOTHING
+// sends. The confirm flow is STATELESS: the confirm card embeds the proposed
+// rule, and when the next user turn answers it, the payload is recovered from
+// message history and RE-VALIDATED server-side (role, destination binding,
+// caps, dupes) before any row is written — a tampered history cannot mint
+// authority the user doesn't have.
+
+const AUTOMATION_REQUIRED_CONNECTOR: Record<string, string> = {
+  transaction_voided: 'rapidrms-api',
+};
+
+type AutomationRow = {
+  id: string;
+  tenant_id: string;
+  kind: 'event' | 'schedule';
+  trigger_type: string | null;
+  report_type: string | null;
+  channel: 'email' | 'sms';
+  destination_ref: string;
+  cadence: { freq: 'daily' | 'weekly'; time?: string; tz?: string } | null;
+  status: string;
+  fingerprint: string;
+  created_at: string;
+  last_checked: string | null;
+  last_fired: string | null;
+};
+
+const AUTOMATION_COLUMNS = 'id,tenant_id,kind,trigger_type,report_type,channel,destination_ref,cadence,status,fingerprint,created_at,last_checked,last_fired';
+
+async function automationRulesForTenant(tenantId: string): Promise<AutomationRow[]> {
+  const supabase = createSupabaseAdmin();
+  const { data, error } = await supabase
+    .from('event_subscriptions')
+    .select(AUTOMATION_COLUMNS)
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as AutomationRow[];
+}
+
+async function automationConnectorConnected(tenantId: string, triggerType: string | null | undefined): Promise<boolean> {
+  const required = triggerType ? AUTOMATION_REQUIRED_CONNECTOR[triggerType] : undefined;
+  if (!required) return false;
+  const supabase = createSupabaseAdmin();
+  const { data } = await supabase
+    .from('tenant_connectors')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('type', required)
+    .eq('status', 'connected')
+    .limit(1);
+  return Boolean(data?.length);
+}
+
+/**
+ * Destination binding (authority rail): alerts only go to prefs-registered
+ * destinations. Email is always registered (account email fallback); SMS
+ * requires a phone saved in notification_preferences.
+ */
+async function automationDestination(tenantId: string, userId: string, channel: 'email' | 'sms'): Promise<{ registered: boolean; label: string; destination: string | null }> {
+  const supabase = createSupabaseAdmin();
+  const { data } = await supabase
+    .from('notification_preferences')
+    .select('destination')
+    .eq('tenant_id', tenantId)
+    .eq('user_id', userId)
+    .eq('channel', channel)
+    .not('destination', 'is', null)
+    .limit(1);
+  const destination = (data?.[0]?.destination as string | undefined) ?? null;
+  return { registered: channel === 'email' || Boolean(destination), label: maskDestination(channel, destination), destination };
+}
+
+/** Shared create-precondition load for both stages (propose card + confirmed save). */
+async function loadAutomationCreateContext(
+  auth: { userId: string; tenantId: string; role: string },
+  rule: RuleSpec,
+  stage: 'propose' | 'save',
+): Promise<{ destination: { registered: boolean; label: string; destination: string | null }; rules: AutomationRow[]; connectorConnected: boolean; fingerprint: string; verdict: CreateDecision }> {
+  const [destination, rules, connectorConnected] = await Promise.all([
+    automationDestination(auth.tenantId, auth.userId, rule.channel),
+    automationRulesForTenant(auth.tenantId),
+    automationConnectorConnected(auth.tenantId, rule.trigger_type),
+  ]);
+  const enabled = rules.filter((r) => r.status !== 'disabled');
+  const sameType = enabled.filter((r) => (rule.kind === 'event' ? r.trigger_type === rule.trigger_type : r.report_type === rule.report_type)) as ExistingRule[];
+  const fingerprint = canonicalFingerprint(rule);
+  const verdict = evaluateCreatePreconditions({
+    role: auth.role,
+    existingRulesCount: enabled.length,
+    existingSameTypeRules: sameType,
+    connectorConnected,
+    destinationRegistered: destination.registered,
+    fingerprint,
+    stage,
+  });
+  return { destination, rules, connectorConnected, fingerprint, verdict };
+}
+
+/** Rejection replies shared by both stages; null = proceed. */
+function automationRejection(verdict: CreateDecision): string | null {
+  switch (verdict.decision) {
+    case 'reject_role':
+      return 'Only a workspace owner or admin can create automation rules. Ask an owner/admin to set this up.';
+    case 'reject_destination':
+      return `I don't have a registered destination for that yet. ${AUTOMATION_PREFS_HINT}`;
+    case 'duplicate_exact':
+      return duplicateReply(verdict.existing.status, verdict.existing.created_at);
+    case 'reject_cap':
+      return `This workspace already has ${verdict.cap} enabled automation rules — that's the limit. Disable or delete one first ("list my alerts").`;
+    default:
+      return null;
+  }
+}
+
+function automationReply(res: ServerResponse, tenantId: string, content: string, extra: Record<string, unknown> = {}): true {
+  json(res, 200, {
+    content,
+    _shre: { model: 'aros-automation', toolsUsed: [], mode: 'aros-automation-direct', tenantId, ...extra },
+  });
+  return true;
+}
+
+const AUTOMATION_PREFS_HINT = 'For safety, alerts can only go to destinations saved in your notification preferences — chat never sends to a number or address typed in the moment. Add your destination on the Notifications page (/notifications), then ask me again.';
+
+async function saveConfirmedAutomation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  rule: RuleSpec,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  // Trust NOTHING that round-tripped through the client: re-derive the
+  // destination from the authenticated user and whitelist the trigger, so a
+  // tampered history cannot mint authority (see banner above handleArosAutomationChat).
+  const sanitized = sanitizeConfirmedRule(rule, { tenantId, userId: auth.userId });
+  if (!sanitized) {
+    return automationReply(res, tenantId, 'That confirmation didn\'t match an automation I can set up, so I discarded it. Please ask again — for example, "text me when someone voids a transaction".');
+  }
+
+  const ctx = await loadAutomationCreateContext(auth, sanitized, 'save');
+  const rejection = automationRejection(ctx.verdict);
+  if (rejection) return automationReply(res, tenantId, rejection);
+
+  const status = ctx.verdict.decision === 'pending_connector' ? 'pending_connector' : 'active';
+  const now = new Date().toISOString();
+  const supabase = createSupabaseAdmin();
+  const { data: inserted, error } = await supabase
+    .from('event_subscriptions')
+    .insert(insertRowForRule(sanitized, { status, userId: auth.userId, fingerprint: ctx.fingerprint, now }))
+    .select('id,created_at')
+    .single();
+  if (error) {
+    // Unique violation = a concurrent create won the race. Re-read the live
+    // row so the reply states its REAL status, never a hardcoded guess.
+    if (error.code === '23505') {
+      const { data: existing } = await supabase
+        .from('event_subscriptions')
+        .select('status,created_at')
+        .eq('tenant_id', tenantId)
+        .eq('fingerprint', ctx.fingerprint)
+        .neq('status', 'disabled')
+        .maybeSingle();
+      return automationReply(res, tenantId, duplicateReply(existing?.status ?? 'active', existing?.created_at));
+    }
+    throw new Error(error.message);
+  }
+
+  // The rule IS the opt-in: enable the matching notification preference so
+  // /notifications reflects it and 1b's delivery gate lines up with chat.
+  const prefRow = prefRowForActiveRule(sanitized, { status, userId: auth.userId, destination: ctx.destination.destination, now });
+  if (prefRow) {
+    await supabase.from('notification_preferences').upsert(prefRow, { onConflict: 'tenant_id,user_id,event_type,channel' });
+  }
+
+  await auditLog({
+    tenantId,
+    userId: auth.userId,
+    action: 'automation.rule_created',
+    resource: `event_subscription:${inserted.id}`,
+    detail: { kind: sanitized.kind, trigger_type: sanitized.trigger_type ?? null, channel: sanitized.channel, status, created_via: 'chat' },
+    ip: getClientIp(req),
+  });
+
+  const what = `when ${triggerLabel(sanitized.trigger_type)}`;
+  if (status === 'pending_connector') {
+    return automationReply(res, tenantId, `Saved — I'll ${channelLabel(sanitized.channel)} ${ctx.destination.label} ${what}. It's **waiting on your store connection**: no POS is connected yet, so it activates automatically once you connect one (Connections page, /onboarding) and will never alert on history from before activation.`);
+  }
+  // Active rule: send a one-time, clearly-labeled test so the creator sees the
+  // alert lane work end-to-end right now (the founder-only safe E2E equivalent).
+  await sendAutomationTestFire(req, tenantId, auth.userId, sanitized.channel, '');
+  return automationReply(res, tenantId, `Done — your rule is **active**. I'll ${channelLabel(sanitized.channel)} ${ctx.destination.label} ${what}. I just sent a **test ${channelLabel(sanitized.channel)}** so you can confirm it arrives (it's labeled as a test and doesn't count toward your limits). Manage it anytime with "list my alerts".`);
+}
+
+async function handleAutomationSubscribe(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  parsed: ParsedAutomation,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  if (parsed.destination_free_text) {
+    return automationReply(res, tenantId, AUTOMATION_PREFS_HINT);
+  }
+  if (parsed.kind === 'schedule' && parsed.supported === false) {
+    return automationReply(res, tenantId, "Scheduled shift/tender reports aren't available yet — your POS doesn't expose a verified shift/tender feed, and I won't guess at numbers. I can alert you when a transaction is voided (\"text me when someone voids a transaction\").");
+  }
+  if (parsed.kind !== 'event' || parsed.trigger_type !== 'transaction_voided' || !parsed.channel) {
+    return automationReply(res, tenantId, 'I can set up void alerts today ("text me when someone voids a transaction"). Other automation triggers are coming.');
+  }
+
+  const rule: RuleSpec = {
+    tenant_id: tenantId,
+    kind: 'event',
+    trigger_type: parsed.trigger_type,
+    scope: 'all-stores',
+    channel: parsed.channel,
+    destination_ref: buildDestinationRef(parsed.channel, auth.userId),
+    cadence: null,
+    params: {},
+  };
+  const ctx = await loadAutomationCreateContext(auth, rule, 'propose');
+  const rejection = automationRejection(ctx.verdict);
+  if (rejection) return automationReply(res, tenantId, rejection);
+
+  const similar = ctx.verdict.decision === 'similar_exists'
+    ? ctx.verdict.similar.map((s, i) => ({
+        // Same numbering as the "list my alerts" answer (full list, created_at asc).
+        index: ctx.rules.findIndex((r) => r.id === s.id) + 1 || i + 1,
+        description: describeRule(s as AutomationRow),
+        created_at: s.created_at,
+      }))
+    : [];
+  const card = confirmationCard(rule, {
+    destinationLabel: ctx.destination.label,
+    connectorConnected: ctx.connectorConnected,
+    similar,
+  });
+  return automationReply(res, tenantId, card, { pendingConfirm: true });
+}
+
+async function handleAutomationManage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  parsed: ParsedAutomation,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  const rules = await automationRulesForTenant(tenantId);
+
+  if (parsed.action === 'list') {
+    if (!rules.length) {
+      return automationReply(res, tenantId, 'You don\'t have any automation rules yet. Try: "text me when someone voids a transaction".');
+    }
+    const lines = ['**Your automations**'];
+    for (const [i, r] of rules.entries()) {
+      lines.push(`${i + 1}. ${describeRule(r)} — created ${r.created_at.slice(0, 10)}${r.last_fired ? `, last fired ${r.last_fired.slice(0, 10)}` : ', never fired'}`);
+    }
+    lines.push('');
+    lines.push('Say "pause rule N" or "delete rule N" to manage one.');
+    return automationReply(res, tenantId, lines.join('\n'));
+  }
+
+  // disable / delete are owner/admin-gated (list stays member-visible).
+  if (!['owner', 'admin'].includes(auth.role)) {
+    return automationReply(res, tenantId, 'Only a workspace owner or admin can change automation rules.');
+  }
+  // Resolve against the FULL list in created_at order — the same numbering
+  // the "list my alerts" answer showed the user.
+  const resolved = resolveRuleRef(rules, parsed.rule_ref);
+  if ('error' in resolved) {
+    if (resolved.error === 'ambiguous') {
+      return automationReply(res, tenantId, 'You have more than one matching rule — say "list my alerts" and tell me which number to change (e.g. "pause rule 2").');
+    }
+    return automationReply(res, tenantId, 'I couldn\'t find a matching automation rule. Say "list my alerts" to see what\'s set up.');
+  }
+  const rule = resolved.rule;
+  const supabase = createSupabaseAdmin();
+  if (parsed.action === 'disable') {
+    if (rule.status === 'disabled') {
+      return automationReply(res, tenantId, 'That rule is already disabled — nothing to change.');
+    }
+    const { error } = await supabase
+      .from('event_subscriptions')
+      .update({ status: 'disabled', updated_at: new Date().toISOString() })
+      .eq('id', rule.id)
+      .eq('tenant_id', tenantId);
+    if (error) throw new Error(error.message);
+    await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_disabled', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel }, ip: getClientIp(req) });
+    return automationReply(res, tenantId, `Paused — the ${channelLabel(rule.channel)} rule for "${rule.kind === 'event' ? triggerLabel(rule.trigger_type) : rule.report_type}" is now disabled. Re-create it anytime.`);
+  }
+  const { error } = await supabase
+    .from('event_subscriptions')
+    .delete()
+    .eq('id', rule.id)
+    .eq('tenant_id', tenantId);
+  if (error) throw new Error(error.message);
+  await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_deleted', resource: `event_subscription:${rule.id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel }, ip: getClientIp(req) });
+  return automationReply(res, tenantId, `Deleted — the ${channelLabel(rule.channel)} rule for "${rule.kind === 'event' ? triggerLabel(rule.trigger_type) : rule.report_type}" is gone.`);
+}
+
+/**
+ * Fire a CLEARLY-labeled test notification to the creator's registered
+ * destination through the same prefs-gated rail. Audit-tagged
+ * `automation.rule_test` — it never touches last_fired and never counts toward
+ * the volume caps (contract test-fire / founder-only E2E safe equivalent).
+ */
+async function sendAutomationTestFire(req: IncomingMessage, tenantId: string, userId: string, channel: 'email' | 'sms', storeLabel: string): Promise<void> {
+  const msg = testFireMessage(storeLabel, channel);
+  await notifyWorkspace(tenantId, 'void-alert', msg.subject, msg.text);
+  await auditLog({ tenantId, userId, action: 'automation.rule_test', resource: 'test', detail: { channel }, ip: getClientIp(req) });
+}
+
+async function handleAutomationTest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  auth: { userId: string; tenantId: string; role: string },
+  parsed: ParsedAutomation,
+): Promise<true> {
+  const tenantId = auth.tenantId;
+  if (!['owner', 'admin'].includes(auth.role)) {
+    return automationReply(res, tenantId, 'Only a workspace owner or admin can send a test alert.');
+  }
+  const rules = await automationRulesForTenant(tenantId);
+  const active = rules.filter((r) => r.status === 'active');
+  if (!active.length) {
+    const pending = rules.some((r) => r.status === 'pending_connector');
+    return automationReply(res, tenantId, pending
+      ? "Your void alert is waiting on a store connection, so there's nothing live to test yet. Connect your store (Connections page, /onboarding) and I'll confirm when it activates."
+      : 'You don\'t have an active void alert to test yet. Set one up first ("text me when someone voids a transaction").');
+  }
+  const resolved = resolveRuleRef(active, parsed.rule_ref);
+  const channel = ('error' in resolved ? active[0].channel : resolved.rule.channel) as 'email' | 'sms';
+  await sendAutomationTestFire(req, tenantId, auth.userId, channel, '');
+  return automationReply(res, tenantId, `Sent a test ${channelLabel(channel)} to your registered destination — it's clearly labeled as a test and doesn't count toward your alert limits. If it doesn't arrive, check your destination on the Notifications page (/notifications).`);
+}
+
+/**
+ * Chat entry point for automation intents. Runs in the direct-intent layer
+ * BEFORE router proxying (and before the sales/store-data intents, which
+ * would otherwise swallow "…voids a transaction" as a sales question).
+ */
+async function handleArosAutomationChat(req: IncomingMessage, res: ServerResponse, body: Record<string, unknown> | null): Promise<boolean> {
+  if (!isArosChatContext(req, body)) return false;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const confirmState = detectConfirmReply(messages);
+  const parsed = parseAutomationSentence(chatLatestText(body));
+  if (!confirmState && !parsed) return false;
+  // A pending confirm answered with something that is neither confirm/cancel
+  // nor a new automation sentence falls through to the normal chat path — the
+  // card is simply abandoned (stateless, nothing was saved).
+  if (confirmState?.state === 'other' && !parsed) return false;
+
+  const tenantId = arosChatTenant(req, body);
+  if (!UUID_RE.test(tenantId)) return false;
+
+  try {
+    const auth = await authenticateRequest(req);
+    if (!auth || auth.tenantId !== tenantId) {
+      // Fail closed: without a verified session there is no role, so no
+      // rule management of any kind.
+      return automationReply(res, tenantId, 'I couldn\'t verify your sign-in for this workspace, so I can\'t manage automations right now. Refresh, sign in, and try again.');
+    }
+
+    if (confirmState?.state === 'cancel') {
+      return automationReply(res, tenantId, 'Okay — discarded. Nothing was saved.');
+    }
+    if (confirmState?.state === 'confirm') {
+      return await saveConfirmedAutomation(req, res, auth, confirmState.rule);
+    }
+    if (!parsed) return false;
+    if (parsed.action === 'subscribe') return await handleAutomationSubscribe(req, res, auth, parsed);
+    if (parsed.action === 'test') return await handleAutomationTest(req, res, auth, parsed);
+    return await handleAutomationManage(req, res, auth, parsed);
+  } catch (err) {
+    console.error('[aros-automation-chat]', err instanceof Error ? err.message : err);
+    return automationReply(res, tenantId, 'Automation rules could not be reached right now — nothing was changed. Please try again in a moment.', { error: 'automation_unavailable' });
+  }
+}
+
+/** GET /api/automations — authed, own-tenant rules list (for the UI slice). */
+async function handleAutomationsList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  try {
+    const rules = await automationRulesForTenant(auth.tenantId);
+    json(res, 200, {
+      automations: rules.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        trigger_type: r.trigger_type,
+        report_type: r.report_type,
+        channel: r.channel,
+        cadence: r.cadence,
+        status: r.status,
+        created_at: r.created_at,
+        last_checked: r.last_checked,
+        last_fired: r.last_fired,
+        description: describeRule(r),
+      })),
+      maxEnabledRules: MAX_ENABLED_RULES,
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[automations.list]', err instanceof Error ? err.message : err);
+    json(res, 502, { error: 'Automations could not be retrieved' });
+  }
+}
+
+type AutomationMutateOp = 'PATCH' | 'DELETE' | 'test';
+
+/**
+ * PATCH/DELETE /api/automations/:id and POST /api/automations/:id/test — the
+ * write path for the /notifications rules panel. Owner/admin-gated (list stays
+ * member-visible), own-tenant only, every change audited — the same authority
+ * rails the chat path enforces. Creation stays chat-only (confirm flow).
+ */
+async function handleAutomationMutate(req: IncomingMessage, res: ServerResponse, id: string, op: AutomationMutateOp): Promise<void> {
+  const auth = await authenticateRequest(req);
+  if (!auth) return json(res, 401, { error: 'Authentication required' });
+  if (!['owner', 'admin'].includes(auth.role)) {
+    return json(res, 403, { error: 'Only a workspace owner or admin can change automation rules.' });
+  }
+  const tenantId = auth.tenantId;
+  const supabase = createSupabaseAdmin();
+  try {
+    const { data: rule } = await supabase
+      .from('event_subscriptions')
+      .select('id,tenant_id,kind,trigger_type,channel,destination_ref,status,created_by')
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+    if (!rule) return json(res, 404, { error: 'Rule not found' });
+
+    if (op === 'DELETE') {
+      const { error } = await supabase.from('event_subscriptions').delete().eq('id', id).eq('tenant_id', tenantId);
+      if (error) throw new Error(error.message);
+      await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_deleted', resource: `event_subscription:${id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel, via: 'ui' }, ip: getClientIp(req) });
+      return json(res, 200, { ok: true, id, status: 'deleted' });
+    }
+
+    if (op === 'test') {
+      if (rule.status !== 'active') return json(res, 409, { error: 'This rule is not active, so there is nothing live to test yet.' });
+      await sendAutomationTestFire(req, tenantId, auth.userId, rule.channel as 'email' | 'sms', '');
+      return json(res, 200, { ok: true, id, status: 'test_sent' });
+    }
+
+    // PATCH — enable/disable toggle.
+    const body = (await parseJsonBody(req)) as { enabled?: unknown } | null;
+    if (!body || typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled (true|false) is required' });
+    const now = new Date().toISOString();
+
+    if (body.enabled === false) {
+      const { error } = await supabase.from('event_subscriptions').update({ status: 'disabled', updated_at: now }).eq('id', id).eq('tenant_id', tenantId);
+      if (error) throw new Error(error.message);
+      await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_disabled', resource: `event_subscription:${id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel, via: 'ui' }, ip: getClientIp(req) });
+      return json(res, 200, { ok: true, id, status: 'disabled' });
+    }
+
+    // Re-enable: connected → active (watermark=now, no backlog); else pending.
+    const connected = await automationConnectorConnected(tenantId, rule.trigger_type);
+    const status = connected ? 'active' : 'pending_connector';
+    const { error } = await supabase.from('event_subscriptions').update({ status, watermark: connected ? now : null, fires_in_window: 0, window_started_at: null, updated_at: now }).eq('id', id).eq('tenant_id', tenantId);
+    if (error) throw new Error(error.message);
+    if (connected) {
+      const spec = { tenant_id: tenantId, kind: 'event', trigger_type: rule.trigger_type, channel: rule.channel, destination_ref: rule.destination_ref } as RuleSpec;
+      const userId = rule.created_by || auth.userId;
+      const prefRow = prefRowForActiveRule(spec, { status: 'active', userId, destination: null, now });
+      if (prefRow) await supabase.from('notification_preferences').upsert(prefRow, { onConflict: 'tenant_id,user_id,event_type,channel' });
+    }
+    await auditLog({ tenantId, userId: auth.userId, action: 'automation.rule_enabled', resource: `event_subscription:${id}`, detail: { trigger_type: rule.trigger_type, channel: rule.channel, status, via: 'ui' }, ip: getClientIp(req) });
+    return json(res, 200, { ok: true, id, status });
+  } catch (err) {
+    console.error('[automations.mutate]', err instanceof Error ? err.message : err);
+    return json(res, 502, { error: 'The rule change could not be saved' });
+  }
+}
+
 type ChatStoreIntent =
   | { kind: 'top_items'; from: string; to: string; limit: number }
   | { kind: 'item_changes'; mode: 'recently_added' | 'recently_edited' | 'recent_price_changes' | 'recent_cost_changes'; limit: number }
@@ -5586,6 +6397,9 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname === '/v1/chat' && method === 'POST') {
     const body = await parseJsonBody(req);
     if (await handleArosHealthPing(req, res, body)) return;
+    // Automation intents run before the data intents: "text me when someone
+    // voids a transaction" would otherwise be swallowed as a sales question.
+    if (await handleArosAutomationChat(req, res, body)) return;
     if (await handleArosStoreDataChat(req, res, body)) return;
     if (await handleArosSalesChat(req, res, body)) return;
     return proxyRequest(req, res, SHRE_ROUTER_URL, body);
@@ -5857,6 +6671,16 @@ async function handler(req: IncomingMessage, res: ServerResponse): Promise<void>
   if (pathname === '/api/notifications/preferences' && (method === 'GET' || method === 'PUT')) {
     return handleNotificationPreferences(req, res);
   }
+  if (pathname === '/api/automations' && method === 'GET') {
+    return handleAutomationsList(req, res);
+  }
+  const automationMutateMatch = pathname.match(/^\/api\/automations\/([0-9a-f-]+)(\/test)?$/);
+  if (automationMutateMatch) {
+    const id = automationMutateMatch[1];
+    if (automationMutateMatch[2] === '/test' && method === 'POST') return handleAutomationMutate(req, res, id, 'test');
+    if (!automationMutateMatch[2] && method === 'PATCH') return handleAutomationMutate(req, res, id, 'PATCH');
+    if (!automationMutateMatch[2] && method === 'DELETE') return handleAutomationMutate(req, res, id, 'DELETE');
+  }
   const platformMatch = pathname.match(/^\/api\/platform\/(overview|tenants|audit)(?:\/([0-9a-f-]+))?$/);
   if (platformMatch && method === 'GET') return handlePlatformConsole(req, res, platformMatch[1], platformMatch[2]);
   const workspaceRolesMatch = pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)\/roles$/);
@@ -5965,6 +6789,19 @@ server.listen(PORT, '0.0.0.0', () => {
     setInterval(() => void runUsageInvoicing(), 24 * 3600_000).unref();
     setTimeout(() => void runUsageInvoicing(), 300_000).unref();
     console.log('[aros-platform] usage invoicing enabled');
+  }
+
+  // Automation sentinel (slice 1b): fires chat-registered event rules
+  // (transaction_voided) and runs the activation sweep. AUTOMATION_RULES=0 is
+  // the hard backstop (skips scheduling entirely); the platform_settings
+  // 'automation_paused' row is the runtime pause the loop checks each pass.
+  // Cadence AUTOMATION_SENTINEL_MIN (default 5 min).
+  if (process.env.AUTOMATION_RULES !== '0') {
+    const sentinelEnv = Number(process.env.AUTOMATION_SENTINEL_MIN);
+    const sentinelMin = Number.isFinite(sentinelEnv) && sentinelEnv > 0 ? sentinelEnv : 5;
+    setInterval(() => void runAutomationSentinel(), sentinelMin * 60_000).unref();
+    setTimeout(() => void runAutomationSentinel(), 120_000).unref();
+    console.log(`[aros-platform] automation sentinel enabled (every ${sentinelMin}m)`);
   }
 });
 

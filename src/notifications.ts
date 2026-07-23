@@ -56,6 +56,16 @@ export const NOTIFICATION_CATALOG = [
     description: 'Someone is invited to, joins, or is removed from this workspace.',
     defaultEnabled: true,
   },
+  {
+    // Automation rules (docs/missions/aros-automation-rules.md). Registered in
+    // slice 1a so preferences can gate delivery; NOTHING sends until the
+    // sentinel ships in slice 1b. Off by default — the rule itself is the
+    // opt-in, created explicitly via the chat confirm flow.
+    id: 'void-alert',
+    label: 'Void alerts',
+    description: 'A transaction is voided at one of your connected stores (used by chat-created automation rules).',
+    defaultEnabled: false,
+  },
 ];
 export type NotificationEvent = (typeof NOTIFICATION_CATALOG)[number]['id'];
 
