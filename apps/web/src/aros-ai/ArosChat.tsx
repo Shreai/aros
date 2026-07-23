@@ -5,6 +5,7 @@ import { ChatMessageRenderer } from './ChatMessageRenderer';
 import { useCanvas } from './CanvasContext';
 import { itemsFromMessages } from './canvas';
 import { chatReplyText } from '../lib/chatReply';
+import { useVoice, speak, cancelSpeech } from './voice';
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -46,6 +47,8 @@ export function ArosChat() {
   const [input, setInput] = useState('');
   const [open, setOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  // Voice-conversation mode: hands-free (each spoken utterance auto-sends) + replies read aloud.
+  const [voiceConvo, setVoiceConvo] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -118,12 +121,31 @@ export function ArosChat() {
       const data = await res.json();
       const reply = chatReplyText(data);
       setMessages((prev) => [...prev, { role: 'agent', content: reply, timestamp: Date.now() }]);
+      if (voiceConvo) speak(reply);
     } catch {
       setMessages((prev) => [...prev, { role: 'agent', content: 'Something went wrong. Please try again.', timestamp: Date.now() }]);
     } finally {
       setSending(false);
     }
   };
+
+  const voice = useVoice({
+    handsFree: voiceConvo,
+    getInput: () => input,
+    setInput,
+    onSend: (text) => { void sendMessage(text); },
+  });
+
+  // Leaving conversation mode (or closing the panel) silences any in-flight speech.
+  const toggleVoiceConvo = () => {
+    setVoiceConvo((on) => {
+      const next = !on;
+      if (!next) cancelSpeech();
+      if (next && voice.supported && !voice.listening) voice.toggleMic();
+      return next;
+    });
+  };
+  useEffect(() => { if (!open) { voice.stop(); cancelSpeech(); } }, [open, voice]);
 
   const send = async (e: FormEvent) => {
     e.preventDefault();
@@ -331,15 +353,53 @@ export function ArosChat() {
             display: 'flex', alignItems: 'center', gap: 6,
           }}
         >
+          {voice.supported && (
+            <button
+              type="button"
+              onClick={toggleVoiceConvo}
+              aria-pressed={voiceConvo}
+              title={voiceConvo ? 'Voice conversation on — spoken messages send and replies are read aloud' : 'Start a voice conversation (hands-free + spoken replies)'}
+              style={{
+                width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: voiceConvo ? c.accent : c.bgInput, color: voiceConvo ? '#fff' : c.text3,
+                border: `1px solid ${c.border1}`, cursor: 'pointer', transition: 'background 150ms, color 150ms',
+              }}
+            >
+              {voiceConvo ? (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+              ) : (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+              )}
+            </button>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', flex: 1, minWidth: 0, borderRadius: 10, border: `1px solid ${c.border1}`, background: c.bgInput }}>
             <input
               ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={`Message ${agentName}...`}
+              placeholder={voice.listening ? 'Listening…' : `Message ${agentName}...`}
+              enterKeyHint="send"
               style={{ flex: 1, minWidth: 0, padding: '10px 14px', fontSize: 13, background: 'transparent', border: 'none', outline: 'none', color: c.text1, lineHeight: 1.47 }}
             />
+            {voice.supported && (
+              <button
+                type="button"
+                onClick={voice.toggleMic}
+                aria-pressed={voice.listening}
+                aria-label={voice.listening ? 'Stop dictation' : 'Dictate a message'}
+                title={voice.listening ? 'Stop dictation' : 'Dictate a message'}
+                style={{
+                  width: 34, height: 34, marginRight: 3, borderRadius: 8, flexShrink: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  color: voice.listening ? '#ff5f57' : c.text3, transition: 'color 150ms',
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              </button>
+            )}
           </div>
           <button
             type="submit"
