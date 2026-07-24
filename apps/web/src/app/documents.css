@@ -178,3 +178,13 @@
   .docs-detail { max-height: none; }
   .docs-shareform { grid-template-columns: 1fr; }
 }
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}

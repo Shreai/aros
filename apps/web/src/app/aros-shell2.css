@@ -185,3 +185,13 @@
   .rsx2-rail__inner { transform: none !important; }
   .rsx2-drawer, .rsx2-profile { animation-duration: 0.001ms !important; }
 }
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
